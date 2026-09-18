@@ -570,18 +570,29 @@ export function LandingCover({ onStart, lastUpdated }: LandingCoverProps) {
         </button>
       </div>
 
-      {/* Futuristic Footer Widget */}
-      <div className={`absolute bottom-0 w-full flex justify-center z-10 transition-opacity duration-500 ${isExiting ? 'opacity-0' : 'opacity-100'}`}>
-        <div className="bg-slate-900/70 backdrop-blur-md border-t border-x border-slate-700/50 rounded-t-3xl px-12 py-5 flex flex-col items-center shadow-[0_-10px_30px_rgba(0,0,0,0.5)]">
-          {/* Hexagon/Cube Icon SVG */}
-          <svg className="w-8 h-8 mb-2 text-cyan-400 opacity-80 drop-shadow-[0_0_8px_rgba(0,212,255,0.5)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
-            <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
-            <line x1="12" y1="22.08" x2="12" y2="12"></line>
-          </svg>
-          <div className="text-white/70 text-xs font-medium tracking-wider">
-            Desenvolvido por <strong className="text-white/90">rbtecX</strong> - Ribeirão Preto | SP
-          </div>
+      {/* Developer Credit - Bottom Right (No background, only cube and text) */}
+      <div 
+        className={`absolute bottom-4 right-4 md:bottom-6 md:right-8 z-20 flex items-center gap-2.5 transition-opacity duration-500 pointer-events-none select-none ${isExiting ? 'opacity-0' : 'opacity-100'}`}
+      >
+        {/* Hexagon/Cube Icon SVG */}
+        <svg 
+          className="w-5 h-5 text-cyan-400 opacity-90 drop-shadow-[0_0_8px_rgba(0,212,255,0.7)] shrink-0" 
+          viewBox="0 0 24 24" 
+          fill="none" 
+          stroke="currentColor" 
+          strokeWidth="1.6" 
+          strokeLinecap="round" 
+          strokeLinejoin="round"
+        >
+          <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+          <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+          <line x1="12" y1="22.08" x2="12" y2="12"></line>
+        </svg>
+        <div 
+          className="text-white/80 text-xs font-medium tracking-wider"
+          style={{ textShadow: '0 2px 8px rgba(0,0,0,0.9), 0 0 10px rgba(0,0,0,0.8)' }}
+        >
+          Desenvolvido por <strong className="text-white font-bold tracking-normal">rbtecX</strong> - Ribeirão Preto | SP
         </div>
       </div>
     </div>

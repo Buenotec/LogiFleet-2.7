@@ -48,7 +48,8 @@ import {
   ArrowUp,
   ArrowDown,
   FileSignature,
-  AlertCircle
+  AlertCircle,
+  HelpCircle
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { format, isAfter, isBefore, addDays, parseISO, subHours, differenceInDays, parse, startOfDay, isValid } from "date-fns";
@@ -85,6 +86,7 @@ import { signInWithGoogleWorkspace, getStoredGoogleToken, setStoredGoogleToken }
 import { LandingCover } from "./components/LandingCover";
 import { FirebaseStatusIndicator } from "./components/FirebaseStatusIndicator";
 import { SidebarToggleButton3D } from "./components/SidebarToggleButton3D";
+import { ComoUsarTab } from "./components/ComoUsarTab";
 
 interface MultiSelectProps {
   label: string;
@@ -1191,7 +1193,7 @@ export default function App() {
   const [isStaticMode, setIsStaticMode] = useState(false);
   const [serverStarting, setServerStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"home" | "dashboard" | "licencas_detalhadas" | "licencas_documentos" | "financeiro_docs" | "financeiro_licencas" | "map" | "settings">("dashboard");
+  const [activeTab, setActiveTab] = useState<"home" | "dashboard" | "licencas_detalhadas" | "licencas_documentos" | "financeiro_docs" | "financeiro_licencas" | "map" | "settings" | "tutorial">("dashboard");
   const [activeDashboardSubTab, setActiveDashboardSubTab] = useState<"licencas" | "documentacao">("licencas");
   const [dashLicActiveTab, setDashLicActiveTab] = useState<"indicadores" | "justificativas" | "farol">("indicadores");
   const [dashDocActiveTab, setDashDocActiveTab] = useState<"indicadores" | "justificativas" | "farol">("indicadores");
@@ -6268,6 +6270,13 @@ export default function App() {
             onClick={() => setActiveTab("settings")}
             collapsed={!isSidebarOpen}
           />
+          <NavItem 
+            icon={<HelpCircle size={22} />} 
+            label="Como Usar?" 
+            active={activeTab === "tutorial"} 
+            onClick={() => setActiveTab("tutorial")}
+            collapsed={!isSidebarOpen}
+          />
         </nav>
 
         {/* Indicador de Conexão Firebase */}
@@ -6383,7 +6392,7 @@ export default function App() {
 
         {/* Content Area */}
         <div className="flex-1 overflow-y-auto p-8">
-          {loading && fleet.length === 0 && (
+          {loading && fleet.length === 0 && activeTab !== "tutorial" && (
             <div className="h-full flex flex-col items-center justify-center text-slate-500 space-y-4">
               <RefreshCw className="animate-spin text-blue-600" size={48} />
               <div className="text-center">
@@ -6399,7 +6408,7 @@ export default function App() {
             </div>
           )}
 
-          {!loading && fleet.length === 0 && !error && (
+          {!loading && fleet.length === 0 && !error && activeTab !== "tutorial" && (
             <div className="h-full flex flex-col items-center justify-center text-slate-500 space-y-4">
               <Truck className="text-slate-300" size={64} />
               <div className="text-center">
@@ -11015,6 +11024,21 @@ export default function App() {
                   originCity={originCity}
                   destinationCity={destinationCity}
                   setRouteDistance={setRouteDistance}
+                />
+              </motion.div>
+            )}
+
+            {activeTab === "tutorial" && (
+              <motion.div 
+                key="tutorial"
+                initial={{ opacity: 0, y: 15 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -15 }}
+                className="max-w-7xl mx-auto space-y-8"
+              >
+                <ComoUsarTab 
+                  onNavigateTab={(tab) => setActiveTab(tab)}
+                  onOpenSettings={() => setActiveTab("settings")}
                 />
               </motion.div>
             )}
