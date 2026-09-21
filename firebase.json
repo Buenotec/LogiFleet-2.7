@@ -5,7 +5,7 @@
       "rules": "firestore.rules"
     },
     {
-      "database": "remixed-firestore-database-id",
+      "database": "ai-studio-logifleetgestode-b5b562de-428c-4d85-949a-f0ffad2f3244",
       "rules": "firestore.rules"
     }
   ]

@@ -107,6 +107,25 @@
         "items",
         "updatedAt"
       ]
+    },
+    "doc_justifications": {
+      "title": "Document Justifications",
+      "description": "Justifications, authorizations, and operational observations for document system records",
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "description": "Array of justification records for documents"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last update"
+        }
+      },
+      "required": [
+        "items",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -117,6 +136,10 @@
     "/license_justifications/all": {
       "schema": "license_justifications",
       "description": "All license justifications and operational notes"
+    },
+    "/doc_justifications/all": {
+      "schema": "doc_justifications",
+      "description": "All document justifications and operational notes"
     }
   }
 }

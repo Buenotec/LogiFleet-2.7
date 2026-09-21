@@ -102,6 +102,48 @@
     width: 0px;
     height: 0px;
   }
+
+  /* 3D Neon Laser Beam Animation for Tooltips and Buttons */
+  @keyframes neon-laser-sweep {
+    0% {
+      left: -35%;
+      transform: translateX(-50%) skewX(-25deg);
+      opacity: 0;
+    }
+    12% {
+      opacity: 0.95;
+    }
+    50% {
+      opacity: 1;
+    }
+    88% {
+      opacity: 0.95;
+    }
+    100% {
+      left: 135%;
+      transform: translateX(-50%) skewX(-25deg);
+      opacity: 0;
+    }
+  }
+
+  @keyframes neon-ambient-bloom {
+    0%, 100% {
+      opacity: 0.75;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 1;
+      transform: scale(1.02);
+    }
+  }
+
+  .animate-neon-laser-sweep {
+    animation: neon-laser-sweep 2.4s cubic-bezier(0.25, 1, 0.4, 1) infinite;
+  }
+
+  .animate-neon-bloom {
+    animation: neon-ambient-bloom 3s ease-in-out infinite;
+  }
 }
 
 @layer base {
@@ -166,4 +208,38 @@
   .leaflet-container {
     @apply !font-sans;
   }
+
+  /* Custom Neon Scrollbar for 3D Neon Cluster Tooltip */
+  .custom-neon-scrollbar::-webkit-scrollbar {
+    width: 5px;
+  }
+  .custom-neon-scrollbar::-webkit-scrollbar-track {
+    background: rgba(15, 23, 42, 0.6);
+    border-radius: 9999px;
+  }
+  .custom-neon-scrollbar::-webkit-scrollbar-thumb {
+    background: linear-gradient(to bottom, #00f0ff, #6366f1);
+    border-radius: 9999px;
+    box-shadow: 0 0 6px #00f0ff;
+  }
+  .custom-neon-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #00f0ff;
+    box-shadow: 0 0 10px #00f0ff;
+  }
+
+  /* Cyber Neon Leaflet Tiles: High-contrast Dark Mode with vibrant vector lines */
+  .leaflet-tile-cyber {
+    filter: invert(100%) hue-rotate(180deg) brightness(88%) contrast(125%) saturate(70%);
+  }
+
+  /* Modo Noturno Elegante (Dark Midnight): 100% nativo via OSM sem nenhuma dependência de API Key */
+  .leaflet-tile-dark-midnight {
+    filter: invert(100%) hue-rotate(180deg) brightness(82%) contrast(128%) grayscale(70%);
+  }
+
+  /* Modo Dark Slate: Tom azul-ardósia escuro com destaque para rodovias */
+  .leaflet-tile-dark-slate {
+    filter: invert(100%) hue-rotate(195deg) brightness(80%) contrast(130%) saturate(40%);
+  }
 }
+

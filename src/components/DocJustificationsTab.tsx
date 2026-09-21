@@ -1,10 +1,10 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   FileSignature, Plus, Edit3, Trash2, CheckCircle2, AlertTriangle, 
   Clock, UserCheck, Calendar, Search, Filter, Download, X, 
   ShieldCheck, AlertOctagon, Truck, Building2, MessageSquare,
   FileSpreadsheet, Table, Copy, Layers, Database, LayoutGrid, RefreshCw, PenLine,
-  Warehouse, CalendarX, RotateCcw, FileText, XCircle
+  Warehouse, CalendarX, RotateCcw, FileText, XCircle, ChevronLeft, ChevronRight
 } from 'lucide-react';
 import { Vehicle, LicenseJustification } from '../types';
 import { cn } from "@/src/lib/utils";
@@ -297,13 +297,29 @@ export const DocJustificationsTab: React.FC<Props> = ({
   };
 
   // Map of justification by plate or plate_doc
+  // Map of justification by plate + docType + status
   const justMap = useMemo(() => {
     const map = new Map<string, LicenseJustification>();
     justifications.forEach(j => {
       if (j.plate) {
-        map.set(j.plate.toUpperCase(), j);
-        if (j.documentType) {
-          map.set(`${j.plate.toUpperCase()}_${j.documentType.toUpperCase()}`, j);
+        const p = (j.plate || "").toUpperCase().trim();
+        const d = (j.documentType || "").toUpperCase().trim();
+        const s = (j.status || "").toUpperCase().trim();
+
+        // Exact match: PLATE#DOC#STATUS
+        if (d && s) {
+          map.set(`${p}#${d}#${s}`, j);
+        }
+        // Match for all docs of that plate with this specific status
+        if (s) {
+          map.set(`${p}#ALL#${s}`, j);
+          map.set(`${p}#TODAS AS LICENÇAS#${s}`, j);
+          map.set(`${p}#TODAS#${s}`, j);
+          map.set(`${p}#GERAL#${s}`, j);
+        }
+        // Match if justification explicitly has no status constraint
+        if (d && !s) {
+          map.set(`${p}#${d}#ANY`, j);
         }
       }
     });
@@ -325,16 +341,41 @@ export const DocJustificationsTab: React.FC<Props> = ({
 
     const docVehicles = baseFleet.filter(v => v.source === "DOCUMENTACAO" || !v.source);
 
+    // Pre-index justifications by plate for instant O(1) lookups
+    const justByPlate = new Map<string, LicenseJustification[]>();
+    for (let i = 0; i < justifications.length; i++) {
+      const j = justifications[i];
+      const p = (j.plate || '').toUpperCase().trim();
+      if (!justByPlate.has(p)) justByPlate.set(p, []);
+      justByPlate.get(p)!.push(j);
+    }
+
+    const includedKeySet = new Set<string>();
+
     docVehicles.forEach(v => {
       const pendingDocs = (v.documents || []).filter(d => 
         d.status === 'vencido' || d.status === 'critico' || d.status === 'atencao'
       );
 
       const opFormatted = formatOperationName(v.operation || v.extraData?.["Filial"] || v.client);
+      const p = (v.plate || '').toUpperCase().trim();
 
       if (pendingDocs.length > 0) {
         pendingDocs.forEach(d => {
-          const specificJust = justMap.get(`${(v.plate || '').toUpperCase()}_${d.type.toUpperCase()}`) || justMap.get((v.plate || '').toUpperCase());
+          const docType = (d.type || v.extraData?.["Descrição"] || "Documentação").toUpperCase().trim();
+          const itemStatus = (d.status || '').toUpperCase().trim();
+
+          // CRITICAL ISOLATION: A justification with status VENCIDO will NEVER match an item with status ATENÇÃO!
+          const specificJust = 
+            justMap.get(`${p}#${docType}#${itemStatus}`) ||
+            justMap.get(`${p}#ALL#${itemStatus}`) ||
+            justMap.get(`${p}#TODAS AS LICENÇAS#${itemStatus}`) ||
+            justMap.get(`${p}#TODAS#${itemStatus}`) ||
+            justMap.get(`${p}#GERAL#${itemStatus}`) ||
+            justMap.get(`${p}#${docType}#ANY`);
+
+          includedKeySet.add(`${p}#${docType}`);
+
           items.push({
             plate: v.plate || v.extraData?.["Placa"] || "-",
             fleet: v.fleet || v.extraData?.["Frota"] || "-",
@@ -347,26 +388,32 @@ export const DocJustificationsTab: React.FC<Props> = ({
           });
         });
       } else {
-        const genJust = justMap.get((v.plate || '').toUpperCase());
-        if (genJust) {
+        const plateJusts = justByPlate.get(p) || [];
+        plateJusts.forEach(genJust => {
+          const docType = (genJust.documentType || v.extraData?.["Descrição"] || "Documentação Geral").toUpperCase().trim();
+          includedKeySet.add(`${p}#${docType}`);
           items.push({
             plate: v.plate || v.extraData?.["Placa"] || "-",
             fleet: v.fleet || v.extraData?.["Frota"] || "-",
             operation: opFormatted,
             documentType: genJust.documentType || v.extraData?.["Descrição"] || "Documentação Geral",
-            status: genJust.status || "OK",
+            status: (genJust.status || "OK").toUpperCase(),
             daysRemaining: 999,
             expiryDate: v.extraData?.["Vencimento"] || "-",
             justification: genJust
           });
-        }
+        });
       }
     });
 
     // Also include any justification for plates not found in baseFleet (e.g. manually entered)
-    justifications.forEach(j => {
-      const alreadyIncluded = items.some(it => it.plate.toUpperCase() === j.plate.toUpperCase() && it.documentType.toUpperCase() === j.documentType.toUpperCase());
-      if (!alreadyIncluded) {
+    for (let i = 0; i < justifications.length; i++) {
+      const j = justifications[i];
+      const p = (j.plate || "").toUpperCase().trim();
+      const docType = (j.documentType || "Documentação Geral").toUpperCase().trim();
+      const key = `${p}#${docType}`;
+      if (!includedKeySet.has(key)) {
+        includedKeySet.add(key);
         items.push({
           plate: j.plate,
           fleet: j.fleet,
@@ -378,7 +425,7 @@ export const DocJustificationsTab: React.FC<Props> = ({
           justification: j
         });
       }
-    });
+    }
 
     return items;
   }, [baseFleet, justifications, justMap]);
@@ -510,32 +557,36 @@ export const DocJustificationsTab: React.FC<Props> = ({
     ];
   }, [alertVehicles]);
 
-  // Filtered rows
+  // Filtered rows - optimized with Sets and normalized search
   const filteredItems = useMemo(() => {
+    const term = searchTerm ? searchTerm.toLowerCase().trim() : "";
+    const platesSet = selectedPlates.length > 0 ? new Set(selectedPlates.map(sp => sp.toUpperCase().trim())) : null;
+    const fleetsSet = selectedFleets.length > 0 ? new Set(selectedFleets.map(sf => String(sf).trim())) : null;
+    const licensesSet = selectedLicenses.length > 0 ? new Set(selectedLicenses.map(sl => sl.toUpperCase().trim())) : null;
+    const statusesSet = selectedStatuses.length > 0 ? new Set(selectedStatuses) : null;
+
     return alertVehicles.filter(it => {
       // Filter by license (multi-select / flegue)
-      if (selectedLicenses.length > 0) {
-        if (!it.documentType || !selectedLicenses.some(sl => sl.trim().toUpperCase() === it.documentType.trim().toUpperCase())) return false;
+      if (licensesSet) {
+        if (!it.documentType || !licensesSet.has(it.documentType.trim().toUpperCase())) return false;
       }
       
       // Filter by status (multi-select / flegue)
-      if (selectedStatuses.length > 0) {
+      if (statusesSet) {
         const itemStatus = (it.status || '').toUpperCase();
-        const matchesStatus = selectedStatuses.some(sel => {
-          if (sel === 'OK') return itemStatus !== 'VENCIDO' && itemStatus !== 'CRITICO' && itemStatus !== 'ATENCAO';
-          return itemStatus === sel;
-        });
+        const matchesStatus = statusesSet.has(itemStatus) || 
+          (statusesSet.has('OK') && itemStatus !== 'VENCIDO' && itemStatus !== 'CRITICO' && itemStatus !== 'ATENCAO');
         if (!matchesStatus) return false;
       }
       
       // Filter by plate (multi-select / flegue)
-      if (selectedPlates.length > 0) {
-        if (!it.plate || !selectedPlates.some(sp => sp.toUpperCase() === it.plate.trim().toUpperCase())) return false;
+      if (platesSet) {
+        if (!it.plate || !platesSet.has(it.plate.trim().toUpperCase())) return false;
       }
 
       // Filter by fleet (multi-select / flegue)
-      if (selectedFleets.length > 0) {
-        if (!it.fleet || !selectedFleets.includes(String(it.fleet).trim())) return false;
+      if (fleetsSet) {
+        if (!it.fleet || !fleetsSet.has(String(it.fleet).trim())) return false;
       }
 
       if (onlyWithJustification === true && !it.justification) return false;
@@ -559,8 +610,7 @@ export const DocJustificationsTab: React.FC<Props> = ({
         if (!lower.includes("sem previsão de renovação") && !lower.includes("sem previsao de renovacao") && !lower.includes("sem previsão") && !lower.includes("sem previsao")) return false;
       }
 
-      if (searchTerm.trim()) {
-        const term = searchTerm.toLowerCase();
+      if (term) {
         const pMatch = it.plate.toLowerCase().includes(term);
         const fMatch = it.fleet.toLowerCase().includes(term);
         const opMatch = it.operation.toLowerCase().includes(term);
@@ -575,6 +625,24 @@ export const DocJustificationsTab: React.FC<Props> = ({
       return true;
     });
   }, [alertVehicles, selectedLicenses, selectedStatuses, selectedPlates, selectedFleets, onlyWithJustification, cardFilter, searchTerm]);
+
+  // High-performance pagination state
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [pageSize, setPageSize] = useState<number>(50);
+
+  // Reset to first page when filtering changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, selectedPlates, selectedFleets, selectedLicenses, selectedStatuses, cardFilter, onlyWithJustification]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredItems.length / pageSize));
+  const validCurrentPage = Math.min(currentPage, totalPages);
+
+  const paginatedItems = useMemo(() => {
+    if (pageSize >= 9999) return filteredItems;
+    const start = (validCurrentPage - 1) * pageSize;
+    return filteredItems.slice(start, start + pageSize);
+  }, [filteredItems, validCurrentPage, pageSize]);
 
   // Statistics
   const stats = useMemo(() => {
@@ -599,7 +667,8 @@ export const DocJustificationsTab: React.FC<Props> = ({
     return { total, withJust, pendingJust, nextYearPostponed, paradoGaragem, semPrevisao };
   }, [alertVehicles]);
 
-  const getRowKey = (plate: string, docType: string) => `${(plate || '').toUpperCase().trim()}_${(docType || '').toUpperCase().trim()}`;
+  const getRowKey = (plate: string, docType: string, status?: string) => 
+    `${(plate || '').toUpperCase().trim()}#${(docType || '').toUpperCase().trim()}#${(status || '').toUpperCase().trim()}`;
 
   const getCellValues = (item: {
     plate: string;
@@ -609,7 +678,7 @@ export const DocJustificationsTab: React.FC<Props> = ({
     status: string;
     justification?: LicenseJustification;
   }) => {
-    const key = getRowKey(item.plate, item.documentType);
+    const key = getRowKey(item.plate, item.documentType, item.status);
     if (inlineEdits[key]) {
       return inlineEdits[key];
     }
@@ -633,7 +702,7 @@ export const DocJustificationsTab: React.FC<Props> = ({
     field: 'reason' | 'authorizedBy' | 'actionForecast' | 'observations',
     value: string
   ) => {
-    const key = getRowKey(item.plate, item.documentType);
+    const key = getRowKey(item.plate, item.documentType, item.status);
     setInlineEdits(prev => {
       const current = prev[key] || {
         reason: item.justification?.reason ?? "",
@@ -661,7 +730,7 @@ export const DocJustificationsTab: React.FC<Props> = ({
       justification?: LicenseJustification;
     }
   ) => {
-    const key = getRowKey(item.plate, item.documentType);
+    const key = getRowKey(item.plate, item.documentType, item.status);
     const current = inlineEdits[key];
     if (!current) return;
 
@@ -685,13 +754,16 @@ export const DocJustificationsTab: React.FC<Props> = ({
 
     setSavingRowKey(key);
     try {
+      const cleanPlate = (item.plate || "").toUpperCase().trim().replace(/[^a-zA-Z0-9]/g, '');
+      const cleanDoc = (item.documentType || "geral").toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
+      const cleanStatus = (item.status || "vencido").toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
       const toSave: LicenseJustification = {
-        id: item.justification?.id || `just_doc_${item.plate.replace(/[^a-zA-Z0-9]/g, '')}_${Date.now()}`,
+        id: item.justification?.id || `just_doc_${cleanPlate}_${cleanDoc}_${cleanStatus}_${Date.now()}`,
         plate: (item.plate || "").toUpperCase().trim(),
         fleet: (item.fleet || "").trim(),
         operation: formatOperationName(item.operation),
         documentType: (item.documentType || "Documentação Geral").trim(),
-        status: (item.status || "VENCIDO").toUpperCase(),
+        status: (item.status || "VENCIDO").toUpperCase().trim(),
         reason: current.reason.trim(),
         authorizedBy: current.authorizedBy.trim(),
         actionForecast: current.actionForecast.trim(),
@@ -730,25 +802,32 @@ export const DocJustificationsTab: React.FC<Props> = ({
     status: string;
     justification?: LicenseJustification;
   }) => {
-    const key = item ? getRowKey(item.plate, item.documentType) : '';
+    setIsSaving(false);
+    setIsAddingReason(false);
+    setNewReasonText("");
+    const key = item ? getRowKey(item.plate, item.documentType, item.status) : '';
     const currentInline = key && inlineEdits[key] ? inlineEdits[key] : null;
 
     if (item?.justification) {
       setEditingItem({
         ...item.justification,
+        status: item.status || item.justification.status || "VENCIDO",
         reason: currentInline?.reason ?? item.justification.reason,
         authorizedBy: currentInline?.authorizedBy ?? item.justification.authorizedBy,
         actionForecast: currentInline?.actionForecast ?? item.justification.actionForecast,
         observations: currentInline?.observations ?? item.justification.observations,
       });
     } else if (item) {
+      const cleanPlate = (item.plate || "").toUpperCase().trim().replace(/[^a-zA-Z0-9]/g, '');
+      const cleanDoc = (item.documentType || "geral").toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
+      const cleanStatus = (item.status || "vencido").toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
       setEditingItem({
-        id: `just_doc_${item.plate}_${Date.now()}`,
+        id: `just_doc_${cleanPlate}_${cleanDoc}_${cleanStatus}_${Date.now()}`,
         plate: item.plate !== "-" ? item.plate : "",
         fleet: item.fleet !== "-" ? item.fleet : "",
         operation: item.operation !== "-" ? item.operation : "",
         documentType: item.documentType,
-        status: item.status,
+        status: (item.status || "VENCIDO").toUpperCase().trim(),
         reason: currentInline?.reason ?? "",
         authorizedBy: currentInline?.authorizedBy ?? "",
         actionForecast: currentInline?.actionForecast ?? "",
@@ -782,13 +861,16 @@ export const DocJustificationsTab: React.FC<Props> = ({
 
     setIsSaving(true);
     try {
+      const cleanPlate = (editingItem.plate || "").toUpperCase().trim().replace(/[^a-zA-Z0-9]/g, '');
+      const cleanDoc = (editingItem.documentType || "geral").toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
+      const cleanStatus = (editingItem.status || "vencido").toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
       const toSave: LicenseJustification = {
-        id: editingItem.id || `just_doc_${editingItem.plate}_${Date.now()}`,
+        id: editingItem.id || `just_doc_${cleanPlate}_${cleanDoc}_${cleanStatus}_${Date.now()}`,
         plate: (editingItem.plate || "").toUpperCase().trim(),
         fleet: (editingItem.fleet || "").trim(),
         operation: formatOperationName(editingItem.operation || ""),
         documentType: (editingItem.documentType || "Documentação Geral").trim(),
-        status: (editingItem.status || "VENCIDO").toUpperCase(),
+        status: (editingItem.status || "VENCIDO").toUpperCase().trim(),
         reason: (editingItem.reason || "").trim(),
         authorizedBy: (editingItem.authorizedBy || "").trim(),
         actionForecast: (editingItem.actionForecast || "").trim(),
@@ -796,26 +878,22 @@ export const DocJustificationsTab: React.FC<Props> = ({
         updatedAt: format(new Date(), "dd/MM/yyyy HH:mm")
       };
 
-      // Proteção de tempo para evitar loop eterno
-      await Promise.race([
-        onSaveJustification(toSave),
-        new Promise(resolve => setTimeout(resolve, 800))
-      ]);
+      await onSaveJustification(toSave);
 
       // Clear inline edit state for this row since it's saved
-      const key = getRowKey(toSave.plate, toSave.documentType);
+      const key = getRowKey(toSave.plate, toSave.documentType, toSave.status);
       setInlineEdits(prev => {
         const next = { ...prev };
         delete next[key];
         return next;
       });
 
-      setSaveSuccessMsg("Justificativa de documentação salva automaticamente no banco de dados!");
+      setSaveSuccessMsg("Justificativa salva com sucesso no sistema e sincronizada!");
       setTimeout(() => setSaveSuccessMsg(null), 3500);
       handleCloseModal();
-    } catch (err) {
+    } catch (err: any) {
       console.error("Erro ao salvar justificativa de documentação:", err);
-      alert("Erro ao salvar justificativa. Tente novamente.");
+      alert("Erro ao salvar justificativa: " + (err?.message || err));
     } finally {
       setIsSaving(false);
     }
@@ -1437,17 +1515,17 @@ export const DocJustificationsTab: React.FC<Props> = ({
                     </td>
                   </tr>
                 ) : (
-                  filteredItems.map((item, idx) => {
+                  paginatedItems.map((item, idx) => {
                     const j = item.justification;
                     const hasJust = !!j;
-                    const rowKey = getRowKey(item.plate, item.documentType);
+                    const rowKey = getRowKey(item.plate, item.documentType, item.status);
                     const vals = getCellValues(item);
                     const isSavingRow = savingRowKey === rowKey;
                     const isSavedRow = savedRowKeys.has(rowKey);
 
                     return (
                       <tr 
-                        key={`${item.plate}_${item.documentType}_${idx}`}
+                        key={`${item.plate}_${item.documentType}_${item.status}_${idx}`}
                         className="hover:bg-slate-50/80 dark:hover:bg-slate-700/40 transition-colors"
                       >
                         <td className="py-2.5 px-3">
@@ -1618,6 +1696,81 @@ export const DocJustificationsTab: React.FC<Props> = ({
               </tbody>
             </table>
           </div>
+
+          {/* Table Pagination Controls */}
+          {filteredItems.length > 0 && (
+            <div className="px-5 py-3.5 bg-slate-50/80 dark:bg-slate-900/60 border-t border-slate-200 dark:border-slate-700 flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400 font-medium">
+                <span>Exibindo</span>
+                <span className="font-bold text-slate-800 dark:text-slate-200 font-mono">
+                  {Math.min((validCurrentPage - 1) * pageSize + 1, filteredItems.length)} - {Math.min(validCurrentPage * pageSize, filteredItems.length)}
+                </span>
+                <span>de</span>
+                <span className="font-bold text-slate-800 dark:text-slate-200 font-mono">{filteredItems.length}</span>
+                <span>registros</span>
+              </div>
+
+              <div className="flex items-center gap-3">
+                {/* Page Size Selector */}
+                <div className="flex items-center gap-1.5 text-slate-500 dark:text-slate-400">
+                  <span className="text-[11px]">Por página:</span>
+                  <select
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value));
+                      setCurrentPage(1);
+                    }}
+                    className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1 text-xs font-bold text-slate-700 dark:text-slate-300 outline-none cursor-pointer"
+                  >
+                    <option value={25}>25</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                    <option value={200}>200</option>
+                    <option value={99999}>Todos</option>
+                  </select>
+                </div>
+
+                {/* Page Navigation */}
+                {totalPages > 1 && (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                      disabled={validCurrentPage <= 1}
+                      className={cn(
+                        "p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 transition-colors flex items-center gap-1 text-xs font-bold",
+                        validCurrentPage <= 1
+                          ? "opacity-40 cursor-not-allowed bg-slate-100 dark:bg-slate-800 text-slate-400"
+                          : "bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 cursor-pointer shadow-xs"
+                      )}
+                      title="Página Anterior"
+                    >
+                      <ChevronLeft size={14} />
+                      <span className="hidden sm:inline">Anterior</span>
+                    </button>
+
+                    <div className="px-3 py-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg font-mono font-bold text-slate-800 dark:text-slate-200 text-xs">
+                      {validCurrentPage} / {totalPages}
+                    </div>
+
+                    <button
+                      onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                      disabled={validCurrentPage >= totalPages}
+                      className={cn(
+                        "p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 transition-colors flex items-center gap-1 text-xs font-bold",
+                        validCurrentPage >= totalPages
+                          ? "opacity-40 cursor-not-allowed bg-slate-100 dark:bg-slate-800 text-slate-400"
+                          : "bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 cursor-pointer shadow-xs"
+                      )}
+                      title="Próxima Página"
+                    >
+                      <span className="hidden sm:inline">Próxima</span>
+                      <ChevronRight size={14} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         /* Grid of Justification Cards */
@@ -1630,14 +1783,15 @@ export const DocJustificationsTab: React.FC<Props> = ({
             </p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-            {filteredItems.map((item, idx) => {
-              const hasJust = !!item.justification;
-              const j = item.justification;
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+              {paginatedItems.map((item, idx) => {
+                const hasJust = !!item.justification;
+                const j = item.justification;
 
               return (
                 <div
-                  key={`${item.plate}_${item.documentType}_${idx}`}
+                  key={`${item.plate}_${item.documentType}_${item.status}_${idx}`}
                   className={cn(
                     "p-5 rounded-3xl border transition-all flex flex-col justify-between group",
                     hasJust
@@ -1773,8 +1927,82 @@ export const DocJustificationsTab: React.FC<Props> = ({
               );
             })}
           </div>
-        )
-      )}
+
+          {/* Cards View Pagination Controls */}
+          {filteredItems.length > 0 && (
+            <div className="px-5 py-3.5 bg-white dark:bg-slate-800/80 rounded-2xl border border-slate-200 dark:border-slate-700 flex flex-wrap items-center justify-between gap-3 text-xs shadow-xs">
+              <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400 font-medium">
+                <span>Exibindo</span>
+                <span className="font-bold text-slate-800 dark:text-slate-200 font-mono">
+                  {Math.min((validCurrentPage - 1) * pageSize + 1, filteredItems.length)} - {Math.min(validCurrentPage * pageSize, filteredItems.length)}
+                </span>
+                <span>de</span>
+                <span className="font-bold text-slate-800 dark:text-slate-200 font-mono">{filteredItems.length}</span>
+                <span>registros</span>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-1.5 text-slate-500 dark:text-slate-400">
+                  <span className="text-[11px]">Por página:</span>
+                  <select
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value));
+                      setCurrentPage(1);
+                    }}
+                    className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1 text-xs font-bold text-slate-700 dark:text-slate-300 outline-none cursor-pointer"
+                  >
+                    <option value={25}>25</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                    <option value={200}>200</option>
+                    <option value={99999}>Todos</option>
+                  </select>
+                </div>
+
+                {totalPages > 1 && (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                      disabled={validCurrentPage <= 1}
+                      className={cn(
+                        "p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 transition-colors flex items-center gap-1 text-xs font-bold",
+                        validCurrentPage <= 1
+                          ? "opacity-40 cursor-not-allowed bg-slate-100 dark:bg-slate-800 text-slate-400"
+                          : "bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 cursor-pointer shadow-xs"
+                      )}
+                      title="Página Anterior"
+                    >
+                      <ChevronLeft size={14} />
+                      <span className="hidden sm:inline">Anterior</span>
+                    </button>
+
+                    <div className="px-3 py-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg font-mono font-bold text-slate-800 dark:text-slate-200 text-xs">
+                      {validCurrentPage} / {totalPages}
+                    </div>
+
+                    <button
+                      onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                      disabled={validCurrentPage >= totalPages}
+                      className={cn(
+                        "p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 transition-colors flex items-center gap-1 text-xs font-bold",
+                        validCurrentPage >= totalPages
+                          ? "opacity-40 cursor-not-allowed bg-slate-100 dark:bg-slate-800 text-slate-400"
+                          : "bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 cursor-pointer shadow-xs"
+                      )}
+                      title="Próxima Página"
+                    >
+                      <span className="hidden sm:inline">Próxima</span>
+                      <ChevronRight size={14} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )
+    )}
 
       {/* Modal: New / Edit Justification */}
       {isModalOpen && editingItem && (

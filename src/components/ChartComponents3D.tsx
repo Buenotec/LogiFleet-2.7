@@ -189,7 +189,7 @@ export const ChartContainer3D: React.FC<ChartContainer3DProps> = ({
         </div>
 
         {/* Chart Content Area */}
-        <div className="flex-1 min-h-0 relative z-20">
+        <div className="flex-1 min-h-0 relative z-20 h-full">
           {children}
         </div>
       </motion.div>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { 
   Flame, 
   Database, 
@@ -17,6 +17,7 @@ import { doc, getDocFromServer, onSnapshot } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import firebaseConfig from "../../firebase-applet-config.json";
 import { cn } from "../lib/utils";
+import { PortalTooltip } from "./PortalTooltip";
 
 export type FirebaseConnectionState = "connected" | "connecting" | "offline" | "error";
 
@@ -37,6 +38,9 @@ export const FirebaseStatusIndicator: React.FC<FirebaseStatusIndicatorProps> = (
   const [isOnline, setIsOnline] = useState<boolean>(
     typeof navigator !== "undefined" ? navigator.onLine : true
   );
+  const collapsedRef = useRef<HTMLDivElement>(null);
+  const [isHoveredCollapsed, setIsHoveredCollapsed] = useState(false);
+  const [collapsedCoords, setCollapsedCoords] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
 
   // Ping Firestore test connection
   const checkConnection = useCallback(async () => {
@@ -259,44 +263,56 @@ export const FirebaseStatusIndicator: React.FC<FirebaseStatusIndicatorProps> = (
         </div>
       ) : (
         /* Modo Recolhido do Menu Lateral */
-        <div
-          id="firebase-connection-indicator-collapsed"
-          onClick={() => setShowDetailsModal(true)}
-          className={cn(
-            "relative w-11 h-11 mx-auto flex items-center justify-center rounded-2xl transition-all cursor-pointer group",
-            "bg-slate-100/80 hover:bg-slate-200/80 dark:bg-slate-900/60 dark:hover:bg-slate-900/90",
-            "border border-slate-200/80 dark:border-slate-800/90 hover:border-amber-500/40 shadow-sm",
-            className
-          )}
-          title={`Firebase: ${statusConfig.text} (${statusConfig.subtext}) - Clique para detalhes`}
-        >
-          <div className="relative w-8 h-8 rounded-xl bg-gradient-to-br from-amber-500/20 to-orange-500/20 border border-amber-500/30 flex items-center justify-center text-amber-500 dark:text-amber-400">
-            <Flame size={19} className="drop-shadow-[0_1px_4px_rgba(245,158,11,0.5)]" />
-            <span
-              className={cn(
-                "absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ring-2 ring-white dark:ring-slate-950",
-                statusConfig.dot
-              )}
-            />
+        <>
+          <div
+            ref={collapsedRef}
+            id="firebase-connection-indicator-collapsed"
+            onClick={() => setShowDetailsModal(true)}
+            onMouseEnter={() => {
+              if (collapsedRef.current) {
+                const rect = collapsedRef.current.getBoundingClientRect();
+                setCollapsedCoords({
+                  top: rect.top + rect.height / 2,
+                  left: rect.right + 12
+                });
+              }
+              setIsHoveredCollapsed(true);
+            }}
+            onMouseLeave={() => setIsHoveredCollapsed(false)}
+            className={cn(
+              "relative w-11 h-11 mx-auto flex items-center justify-center rounded-2xl transition-all cursor-pointer group select-none",
+              "bg-slate-100/80 hover:bg-slate-200/80 dark:bg-slate-900/60 dark:hover:bg-slate-900/90",
+              "border border-slate-200/80 dark:border-slate-800/90 hover:border-amber-500/40 shadow-sm",
+              className
+            )}
+          >
+            <div className="relative w-8 h-8 rounded-xl bg-gradient-to-br from-amber-500/20 to-orange-500/20 border border-amber-500/30 flex items-center justify-center text-amber-500 dark:text-amber-400">
+              <Flame size={19} className="drop-shadow-[0_1px_4px_rgba(245,158,11,0.5)]" />
+              <span
+                className={cn(
+                  "absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ring-2 ring-white dark:ring-slate-950",
+                  statusConfig.dot
+                )}
+              />
+            </div>
           </div>
 
-          {/* Tooltip 3D Holográfico quando RECOLHIDO */}
-          <div className="absolute left-full ml-3.5 top-1/2 -translate-y-1/2 z-50 pointer-events-none opacity-0 group-hover:opacity-100 -translate-x-2 group-hover:translate-x-0 transition-all duration-200 ease-out whitespace-nowrap">
-            <div className="relative py-2 px-3 rounded-xl bg-[#080d1a]/95 backdrop-blur-xl border border-amber-500/50 shadow-[0_10px_25px_-5px_rgba(0,0,0,0.8),0_0_20px_rgba(245,158,11,0.4),inset_0_1px_1px_rgba(255,255,255,0.2)] text-white flex items-center gap-2.5">
-              <span className={cn("w-2 h-2 rounded-full", statusConfig.dot)} />
-              <div className="flex flex-col">
-                <span className="text-xs font-display font-black tracking-wide uppercase text-slate-100">
-                  Firebase Cloud
-                </span>
-                <span className="text-[10px] text-amber-300/90 font-mono">
-                  {statusConfig.text} • {statusConfig.subtext}
-                </span>
-              </div>
+          <PortalTooltip 
+            isOpen={isHoveredCollapsed} 
+            coords={collapsedCoords}
+            accentColor="amber"
+          >
+            <span className={cn("w-2 h-2 rounded-full", statusConfig.dot)} />
+            <div className="flex flex-col">
+              <span className="text-xs font-display font-black tracking-wide uppercase text-slate-100">
+                Firebase Cloud
+              </span>
+              <span className="text-[10px] text-amber-300/90 font-mono">
+                {statusConfig.text} • {statusConfig.subtext}
+              </span>
             </div>
-            {/* Micro Seta do Tooltip */}
-            <div className="absolute top-1/2 -left-1 -translate-y-1/2 w-2 h-2 bg-[#080d1a] border-l border-b border-amber-500/50 transform rotate-45" />
-          </div>
-        </div>
+          </PortalTooltip>
+        </>
       )}
 
       {/* Modal / Dialog de Detalhes da Conexão Firebase */}

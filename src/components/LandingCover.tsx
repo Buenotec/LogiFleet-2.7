@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { format } from 'date-fns';
+import { NeonLaserBeam } from './NeonLaserBeam';
 
 interface LandingCoverProps {
   onStart: () => void;
@@ -557,16 +558,21 @@ export function LandingCover({ onStart, lastUpdated }: LandingCoverProps) {
           Inteligência e visualização de dados documentais em tempo real
         </p>
         
-        {/* Futuristic Button */}
+        {/* Futuristic Button com Feixe de Luz Neon 3D */}
         <button
           onClick={handleStart}
-          className="relative group bg-slate-900/60 backdrop-blur-md border border-cyan-500/50 text-white px-12 py-[16px] text-[1.1rem] md:text-[1.2rem] font-semibold rounded-[50px] cursor-pointer transition-all duration-300 shadow-[0_0_20px_rgba(0,212,255,0.25),inset_0_0_20px_rgba(0,212,255,0.15)] hover:scale-105 hover:bg-cyan-950/70 hover:border-cyan-300 hover:shadow-[0_0_35px_rgba(0,212,255,0.5),inset_0_0_30px_rgba(0,212,255,0.3)] focus:outline-none overflow-hidden"
+          className="relative group bg-slate-900/70 backdrop-blur-md border border-cyan-500/60 text-white px-12 py-[16px] text-[1.1rem] md:text-[1.2rem] font-semibold rounded-[50px] cursor-pointer transition-all duration-300 shadow-[0_0_22px_rgba(0,212,255,0.3),inset_0_0_20px_rgba(0,212,255,0.18)] hover:scale-105 hover:bg-cyan-950/80 hover:border-cyan-300 hover:shadow-[0_0_40px_rgba(0,212,255,0.65),inset_0_0_30px_rgba(0,212,255,0.35)] focus:outline-none overflow-hidden select-none"
         >
+          {/* Animação 3D com Feixe de Luz Laser Neon passando pelo botão */}
+          <NeonLaserBeam alwaysAnimate roundedClass="rounded-[50px]" accentColor="cyan" />
+
           {/* Cyan Glow lines on sides inside button */}
-          <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1.5 h-1/2 bg-cyan-400 rounded-r-full shadow-[0_0_10px_#00d4ff] opacity-80 group-hover:h-3/4 group-hover:opacity-100 transition-all duration-300" />
-          <div className="absolute right-0 top-1/2 -translate-y-1/2 w-1.5 h-1/2 bg-cyan-400 rounded-l-full shadow-[0_0_10px_#00d4ff] opacity-80 group-hover:h-3/4 group-hover:opacity-100 transition-all duration-300" />
+          <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1.5 h-1/2 bg-cyan-400 rounded-r-full shadow-[0_0_12px_#00d4ff] opacity-85 group-hover:h-3/4 group-hover:opacity-100 transition-all duration-300 z-20" />
+          <div className="absolute right-0 top-1/2 -translate-y-1/2 w-1.5 h-1/2 bg-cyan-400 rounded-l-full shadow-[0_0_12px_#00d4ff] opacity-85 group-hover:h-3/4 group-hover:opacity-100 transition-all duration-300 z-20" />
           
-          <span className="relative z-10 tracking-wide font-bold drop-shadow-md">Iniciar Sistema</span>
+          <span className="relative z-20 tracking-wide font-bold drop-shadow-[0_2px_8px_rgba(0,0,0,0.9)] text-white group-hover:text-cyan-100 transition-colors">
+            Iniciar Sistema
+          </span>
         </button>
       </div>
 

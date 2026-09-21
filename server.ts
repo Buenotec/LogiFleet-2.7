@@ -269,20 +269,131 @@ function extractCleanDocTypeAndValidity(rawKey: string, initialValidity: string)
   const JUSTIFICATIONS_FILE = path.join(process.cwd(), "justifications_db.json");
   const DOC_JUSTIFICATIONS_FILE = path.join(process.cwd(), "doc_justifications_db.json");
 
-  app.get("/api/justifications", (req, res) => {
+  // Load Firebase Config for Firestore REST persistence across any machine/user
+  let firebaseConfig: any = null;
+  try {
+    const cfgPath = path.join(process.cwd(), "firebase-applet-config.json");
+    if (fs.existsSync(cfgPath)) {
+      firebaseConfig = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
+      console.log("Firebase config loaded successfully for server-side persistence.");
+    }
+  } catch (e) {
+    console.warn("Could not load firebase-applet-config.json:", e);
+  }
+
+  function toFirestoreValue(val: any): any {
+    if (val === null || val === undefined) return { nullValue: null };
+    if (typeof val === "boolean") return { booleanValue: val };
+    if (typeof val === "number") {
+      if (Number.isInteger(val)) return { integerValue: String(val) };
+      return { doubleValue: val };
+    }
+    if (typeof val === "string") return { stringValue: val };
+    if (Array.isArray(val)) {
+      return { arrayValue: { values: val.map(toFirestoreValue) } };
+    }
+    if (typeof val === "object") {
+      const fields: Record<string, any> = {};
+      for (const [k, v] of Object.entries(val)) {
+        if (v !== undefined) {
+          fields[k] = toFirestoreValue(v);
+        }
+      }
+      return { mapValue: { fields } };
+    }
+    return { stringValue: String(val) };
+  }
+
+  function fromFirestoreValue(val: any): any {
+    if (!val) return null;
+    if ("stringValue" in val) return val.stringValue;
+    if ("booleanValue" in val) return val.booleanValue;
+    if ("integerValue" in val) return parseInt(val.integerValue, 10);
+    if ("doubleValue" in val) return parseFloat(val.doubleValue);
+    if ("nullValue" in val) return null;
+    if ("arrayValue" in val) {
+      return (val.arrayValue.values || []).map(fromFirestoreValue);
+    }
+    if ("mapValue" in val) {
+      const obj: Record<string, any> = {};
+      for (const [k, v] of Object.entries(val.mapValue.fields || {})) {
+        obj[k] = fromFirestoreValue(v);
+      }
+      return obj;
+    }
+    return null;
+  }
+
+  async function getFirestoreDoc(collection: string, docId: string): Promise<any | null> {
+    if (!firebaseConfig?.projectId || !firebaseConfig?.apiKey) return null;
     try {
+      const dbId = firebaseConfig.firestoreDatabaseId || "(default)";
+      const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${dbId}/documents/${collection}/${docId}?key=${firebaseConfig.apiKey}`;
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      const json: any = await res.json();
+      if (!json.fields) return null;
+      const docData: Record<string, any> = {};
+      for (const [k, v] of Object.entries(json.fields)) {
+        docData[k] = fromFirestoreValue(v);
+      }
+      return docData;
+    } catch (err) {
+      console.warn(`[Firestore REST] Error fetching ${collection}/${docId}:`, err);
+      return null;
+    }
+  }
+
+  async function setFirestoreDoc(collection: string, docId: string, data: Record<string, any>): Promise<boolean> {
+    if (!firebaseConfig?.projectId || !firebaseConfig?.apiKey) return false;
+    try {
+      const dbId = firebaseConfig.firestoreDatabaseId || "(default)";
+      const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${dbId}/documents/${collection}/${docId}?key=${firebaseConfig.apiKey}`;
+      const fields: Record<string, any> = {};
+      for (const [k, v] of Object.entries(data)) {
+        fields[k] = toFirestoreValue(v);
+      }
+      const res = await fetch(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fields })
+      });
+      return res.ok;
+    } catch (err) {
+      console.warn(`[Firestore REST] Error saving ${collection}/${docId}:`, err);
+      return false;
+    }
+  }
+
+  app.get("/api/justifications", async (req, res) => {
+    try {
+      // 1. Read from Firestore cloud database (guarantees cross-machine / cross-user consistency)
+      const firestoreData = await getFirestoreDoc("license_justifications", "all");
+      if (firestoreData && Array.isArray(firestoreData.items)) {
+        try {
+          fs.writeFileSync(JUSTIFICATIONS_FILE, JSON.stringify(firestoreData, null, 2), "utf-8");
+        } catch (_) {}
+        return res.json(firestoreData);
+      }
+
+      // 2. Fallback to local cache if offline or starting up
       if (fs.existsSync(JUSTIFICATIONS_FILE)) {
         const data = fs.readFileSync(JUSTIFICATIONS_FILE, "utf-8");
         return res.json(JSON.parse(data));
       }
       return res.json({ items: [], lastUpdated: null });
     } catch (err) {
-      console.error("Error reading justifications_db.json:", err);
+      console.error("Error reading justifications:", err);
+      if (fs.existsSync(JUSTIFICATIONS_FILE)) {
+        try {
+          return res.json(JSON.parse(fs.readFileSync(JUSTIFICATIONS_FILE, "utf-8")));
+        } catch (_) {}
+      }
       return res.status(500).json({ error: "Failed to read justifications" });
     }
   });
 
-  app.post("/api/justifications", (req, res) => {
+  app.post("/api/justifications", async (req, res) => {
     try {
       const items = Array.isArray(req.body?.items) ? req.body.items : (Array.isArray(req.body) ? req.body : []);
       const payload = {
@@ -290,28 +401,51 @@ function extractCleanDocTypeAndValidity(rawKey: string, initialValidity: string)
         lastUpdated: new Date().toISOString(),
         count: items.length
       };
-      fs.writeFileSync(JUSTIFICATIONS_FILE, JSON.stringify(payload, null, 2), "utf-8");
+
+      // 1. Cloud persistence to Firestore (stored permanently in Firebase)
+      await setFirestoreDoc("license_justifications", "all", payload);
+
+      // 2. Local disk fallback
+      try {
+        fs.writeFileSync(JUSTIFICATIONS_FILE, JSON.stringify(payload, null, 2), "utf-8");
+      } catch (_) {}
+
       return res.json({ success: true, count: items.length, lastUpdated: payload.lastUpdated });
     } catch (err) {
-      console.error("Error writing justifications_db.json:", err);
+      console.error("Error writing justifications:", err);
       return res.status(500).json({ error: "Failed to save justifications" });
     }
   });
 
-  app.get("/api/doc-justifications", (req, res) => {
+  app.get("/api/doc-justifications", async (req, res) => {
     try {
+      // 1. Read from Firestore cloud database
+      const firestoreData = await getFirestoreDoc("doc_justifications", "all");
+      if (firestoreData && Array.isArray(firestoreData.items)) {
+        try {
+          fs.writeFileSync(DOC_JUSTIFICATIONS_FILE, JSON.stringify(firestoreData, null, 2), "utf-8");
+        } catch (_) {}
+        return res.json(firestoreData);
+      }
+
+      // 2. Fallback to local cache
       if (fs.existsSync(DOC_JUSTIFICATIONS_FILE)) {
         const data = fs.readFileSync(DOC_JUSTIFICATIONS_FILE, "utf-8");
         return res.json(JSON.parse(data));
       }
       return res.json({ items: [], lastUpdated: null });
     } catch (err) {
-      console.error("Error reading doc_justifications_db.json:", err);
+      console.error("Error reading doc justifications:", err);
+      if (fs.existsSync(DOC_JUSTIFICATIONS_FILE)) {
+        try {
+          return res.json(JSON.parse(fs.readFileSync(DOC_JUSTIFICATIONS_FILE, "utf-8")));
+        } catch (_) {}
+      }
       return res.status(500).json({ error: "Failed to read doc justifications" });
     }
   });
 
-  app.post("/api/doc-justifications", (req, res) => {
+  app.post("/api/doc-justifications", async (req, res) => {
     try {
       const items = Array.isArray(req.body?.items) ? req.body.items : (Array.isArray(req.body) ? req.body : []);
       const payload = {
@@ -319,10 +453,18 @@ function extractCleanDocTypeAndValidity(rawKey: string, initialValidity: string)
         lastUpdated: new Date().toISOString(),
         count: items.length
       };
-      fs.writeFileSync(DOC_JUSTIFICATIONS_FILE, JSON.stringify(payload, null, 2), "utf-8");
+
+      // 1. Cloud persistence to Firestore
+      await setFirestoreDoc("doc_justifications", "all", payload);
+
+      // 2. Local disk fallback
+      try {
+        fs.writeFileSync(DOC_JUSTIFICATIONS_FILE, JSON.stringify(payload, null, 2), "utf-8");
+      } catch (_) {}
+
       return res.json({ success: true, count: items.length, lastUpdated: payload.lastUpdated });
     } catch (err) {
-      console.error("Error writing doc_justifications_db.json:", err);
+      console.error("Error writing doc justifications:", err);
       return res.status(500).json({ error: "Failed to save doc justifications" });
     }
   });

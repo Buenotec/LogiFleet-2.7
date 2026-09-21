@@ -28,6 +28,12 @@ export interface Vehicle {
   overallStatus: DocumentStatus;
   source?: "LICENCAS" | "DOCUMENTACAO";
   extraData?: any;
+  isDefaultLocation?: boolean;
+  isPreferredLocation?: boolean;
+  defaultLocationName?: string;
+  rawCity?: string;
+  rawDriver?: string;
+  resolvedCoords?: [number, number] | null;
 }
 
 export interface FleetStats {

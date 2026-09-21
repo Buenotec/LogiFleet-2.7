@@ -87,6 +87,9 @@ import { LandingCover } from "./components/LandingCover";
 import { FirebaseStatusIndicator } from "./components/FirebaseStatusIndicator";
 import { SidebarToggleButton3D } from "./components/SidebarToggleButton3D";
 import { ComoUsarTab } from "./components/ComoUsarTab";
+import { OperationDistributionChart } from "./components/OperationDistributionChart";
+import { PortalTooltip } from "./components/PortalTooltip";
+import { NeonLaserBeam } from "./components/NeonLaserBeam";
 
 interface MultiSelectProps {
   label: string;
@@ -196,6 +199,18 @@ function extractCleanDocTypeAndValidity(rawKey: string, initialValidity: string)
 function MultiSelect({ label, options, selected, onChange, placeholder = "Todos", formatOption, className }: MultiSelectProps & { className?: string }) {
   const [isOpen, setIsOpen] = useState(false);
   const [filterText, setFilterText] = useState("");
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [isOpen]);
 
   const filteredOptions = useMemo(() => {
     return options.filter(opt => {
@@ -215,7 +230,7 @@ function MultiSelect({ label, options, selected, onChange, placeholder = "Todos"
   const isAllSelected = selected.length === options.length && options.length > 0;
 
   return (
-    <div className={cn("space-y-2 relative transition-all", isOpen ? "z-[100]" : "z-10", className)}>
+    <div ref={containerRef} className={cn("space-y-2 relative transition-all", isOpen ? "z-[50]" : "z-10", className)}>
       <label className="text-[10px] font-black text-slate-500 dark:text-slate-400 uppercase tracking-widest ml-1">{label}</label>
       <div 
         className={cn(
@@ -225,7 +240,7 @@ function MultiSelect({ label, options, selected, onChange, placeholder = "Todos"
         onClick={() => setIsOpen(!isOpen)}
       >
         <span className={cn("truncate", selected.length === 0 ? "text-slate-400 dark:text-slate-400" : "text-slate-900 dark:text-white font-bold")}>
-          {selected.length === 0 ? placeholder : selected.length === options.length ? "Todos Selecionados" : `${selected.length} Selecionados`}
+          {selected.length === 0 ? placeholder : selected.length === 1 ? (formatOption ? formatOption(selected[0]) : selected[0]) : selected.length === options.length ? "Todos Selecionados" : `${selected.length} Selecionados`}
         </span>
         <motion.div animate={{ rotate: isOpen ? 180 : 0 }}>
           <ChevronDown size={16} className="text-slate-400 dark:text-slate-400" />
@@ -235,12 +250,12 @@ function MultiSelect({ label, options, selected, onChange, placeholder = "Todos"
       <AnimatePresence>
         {isOpen && (
           <>
-            <div className="fixed inset-0 z-[90]" onClick={() => setIsOpen(false)} />
+            <div className="fixed inset-0 z-[40]" onClick={() => setIsOpen(false)} />
             <motion.div 
               initial={{ opacity: 0, scale: 0.95, y: 10 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 10 }}
-              className="absolute top-full left-0 right-0 mt-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700/80 rounded-3xl shadow-2xl z-[100] max-h-[400px] overflow-hidden flex flex-col min-w-[280px]"
+              className="absolute top-full left-0 right-0 mt-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700/80 rounded-3xl shadow-2xl z-[50] max-h-[400px] overflow-hidden flex flex-col min-w-[280px]"
             >
               <div className="p-4 border-b border-slate-100 dark:border-slate-800 space-y-3 bg-slate-50/70 dark:bg-slate-800/50">
                 <div className="flex items-center justify-between gap-2">
@@ -1376,66 +1391,109 @@ export default function App() {
     return () => clearTimeout(timeoutId);
   }, [settings, settingsLoaded]);
 
-  // Firestore & local sync for License Justifications
+  // Cross-machine synchronization & persistence for License Justifications
   useEffect(() => {
-    // Initial fetch from server database backup if needed
-    fetch("/api/justifications")
-      .then(res => res.ok ? res.json() : null)
-      .then(data => {
-        if (data && Array.isArray(data.items) && data.items.length > 0) {
-          setJustifications(prev => prev.length === 0 ? data.items : prev);
-        }
-      })
-      .catch(err => console.warn("Failed to fetch /api/justifications fallback:", err));
-
-    const justDocRef = doc(db, "license_justifications", "all");
-    const unsubscribe = onSnapshot(justDocRef, (snapshot) => {
-      if (snapshot.exists()) {
-        const remoteData = snapshot.data();
-        if (Array.isArray(remoteData?.items)) {
-          setJustifications(remoteData.items);
-          try {
-            localStorage.setItem("uni_license_justifications", JSON.stringify(remoteData.items));
-          } catch (e) {
-            console.error("Local storage error saving justifications:", e);
+    const syncServerJustifications = async () => {
+      try {
+        const res = await fetch("/api/justifications");
+        if (res.ok) {
+          const data = await res.json();
+          if (data && Array.isArray(data.items) && data.items.length > 0) {
+            setJustifications(data.items);
+            try {
+              localStorage.setItem("uni_license_justifications", JSON.stringify(data.items));
+            } catch (_) {}
           }
         }
+      } catch (err) {
+        console.warn("Failed to fetch /api/justifications:", err);
+      } finally {
+        setJustificationsLoaded(true);
       }
+    };
+
+    // Initial fetch
+    syncServerJustifications();
+
+    // Auto-sync across different machines every 12 seconds
+    const intervalId = setInterval(syncServerJustifications, 12000);
+
+    // Sync immediately when user focuses back on the tab/window
+    const onWindowFocus = () => syncServerJustifications();
+    window.addEventListener("focus", onWindowFocus);
+
+    // Firestore real-time listener as primary cloud sync
+    let unsubscribe = () => {};
+    try {
+      const justDocRef = doc(db, "license_justifications", "all");
+      unsubscribe = onSnapshot(justDocRef, (snapshot) => {
+        if (snapshot.exists()) {
+          const remoteData = snapshot.data();
+          if (Array.isArray(remoteData?.items)) {
+            setJustifications(remoteData.items);
+            try {
+              localStorage.setItem("uni_license_justifications", JSON.stringify(remoteData.items));
+            } catch (_) {}
+          }
+        }
+        setJustificationsLoaded(true);
+      }, (error) => {
+        setJustificationsLoaded(true);
+        console.warn("Firestore offline/fallback for license_justifications:", error);
+      });
+    } catch (_) {
       setJustificationsLoaded(true);
-    }, (error) => {
-      setJustificationsLoaded(true);
-      handleFirestoreError(error, OperationType.GET, "license_justifications/all");
-    });
+    }
 
     return () => {
+      clearInterval(intervalId);
+      window.removeEventListener("focus", onWindowFocus);
       unsubscribe();
     };
   }, []);
 
   const handleSaveJustification = async (just: LicenseJustification) => {
-    const nextJustifications = [...justifications.filter(j => j.id !== just.id), just];
+    // Isolate by plate + documentType + status: only replace the exact same item
+    const nextJustifications = [
+      ...justifications.filter(j => {
+        if (j.id === just.id) return false;
+        const samePlate = (j.plate || "").toUpperCase().trim() === (just.plate || "").toUpperCase().trim();
+        const sameDoc = (j.documentType || "").toUpperCase().trim() === (just.documentType || "").toUpperCase().trim();
+        const sameStatus = (j.status || "").toUpperCase().trim() === (just.status || "").toUpperCase().trim();
+        if (samePlate && sameDoc && sameStatus) return false;
+        return true;
+      }),
+      just
+    ];
+
     setJustifications(nextJustifications);
+
+    // 1. Immediate local persistence
     try {
       localStorage.setItem("uni_license_justifications", JSON.stringify(nextJustifications));
-      const justDocRef = doc(db, "license_justifications", "all");
-      // Sincroniza em segundo plano com timeout para nunca travar a interface
-      Promise.race([
-        setDoc(justDocRef, {
-          items: nextJustifications,
-          updatedAt: new Date().toISOString()
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout Firestore")), 1500))
-      ]).catch(e => {
-        console.warn("Sincronização remota Firestore (licenças) em segundo plano ou offline:", e);
-      });
-      fetch("/api/justifications", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: nextJustifications })
-      }).catch(err => console.warn("Backup to /api/justifications failed:", err));
     } catch (e) {
       console.warn("Erro ao salvar localmente:", e);
     }
+
+    // 2. Server persistence across machines
+    try {
+      await fetch("/api/justifications", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: nextJustifications })
+      });
+    } catch (err) {
+      console.warn("Backup to /api/justifications failed:", err);
+    }
+
+    // 3. Firestore cloud sync
+    try {
+      const justDocRef = doc(db, "license_justifications", "all");
+      setDoc(justDocRef, {
+        items: nextJustifications,
+        updatedAt: new Date().toISOString()
+      }).catch(e => console.warn("Firestore license sync notice:", e));
+    } catch (_) {}
   };
 
   const handleDeleteJustification = async (id: string) => {
@@ -1443,83 +1501,130 @@ export default function App() {
     setJustifications(nextJustifications);
     try {
       localStorage.setItem("uni_license_justifications", JSON.stringify(nextJustifications));
-      const justDocRef = doc(db, "license_justifications", "all");
-      Promise.race([
-        setDoc(justDocRef, {
-          items: nextJustifications,
-          updatedAt: new Date().toISOString()
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout Firestore")), 1500))
-      ]).catch(e => console.warn("Remoção Firestore (licenças) em segundo plano:", e));
-      fetch("/api/justifications", {
+    } catch (_) {}
+
+    try {
+      await fetch("/api/justifications", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ items: nextJustifications })
-      }).catch(err => console.warn("Backup to /api/justifications failed:", err));
-    } catch (e) {
-      console.warn("Erro ao remover localmente:", e);
+      });
+    } catch (err) {
+      console.warn("Delete in /api/justifications failed:", err);
     }
+
+    try {
+      const justDocRef = doc(db, "license_justifications", "all");
+      setDoc(justDocRef, {
+        items: nextJustifications,
+        updatedAt: new Date().toISOString()
+      }).catch(e => console.warn("Firestore delete notice:", e));
+    } catch (_) {}
   };
 
-  // Sincronização em tempo real das justificativas de documentação
+  // Cross-machine synchronization & persistence for Document Justifications
   useEffect(() => {
-    fetch("/api/doc-justifications")
-      .then(res => res.ok ? res.json() : null)
-      .then(data => {
-        if (data && Array.isArray(data.items) && data.items.length > 0) {
-          setDocJustifications(prev => prev.length === 0 ? data.items : prev);
-        }
-      })
-      .catch(err => console.warn("Failed to fetch /api/doc-justifications fallback:", err));
-
-    const docRef = doc(db, "doc_justifications", "all");
-    const unsubscribe = onSnapshot(docRef, (snapshot) => {
-      if (snapshot.exists()) {
-        const remoteData = snapshot.data();
-        if (Array.isArray(remoteData?.items)) {
-          setDocJustifications(remoteData.items);
-          try {
-            localStorage.setItem("uni_doc_justifications", JSON.stringify(remoteData.items));
-          } catch (e) {
-            console.error("Local storage error saving doc justifications:", e);
+    const syncServerDocJustifications = async () => {
+      try {
+        const res = await fetch("/api/doc-justifications");
+        if (res.ok) {
+          const data = await res.json();
+          if (data && Array.isArray(data.items) && data.items.length > 0) {
+            setDocJustifications(data.items);
+            try {
+              localStorage.setItem("uni_doc_justifications", JSON.stringify(data.items));
+            } catch (_) {}
           }
         }
+      } catch (err) {
+        console.warn("Failed to fetch /api/doc-justifications:", err);
+      } finally {
+        setDocJustificationsLoaded(true);
       }
+    };
+
+    // Initial fetch
+    syncServerDocJustifications();
+
+    // Auto-sync across different machines every 12 seconds
+    const intervalId = setInterval(syncServerDocJustifications, 12000);
+
+    // Sync immediately when window gains focus
+    const onWindowFocus = () => syncServerDocJustifications();
+    window.addEventListener("focus", onWindowFocus);
+
+    // Firestore real-time listener as primary cloud sync
+    let unsubscribe = () => {};
+    try {
+      const docRef = doc(db, "doc_justifications", "all");
+      unsubscribe = onSnapshot(docRef, (snapshot) => {
+        if (snapshot.exists()) {
+          const remoteData = snapshot.data();
+          if (Array.isArray(remoteData?.items)) {
+            setDocJustifications(remoteData.items);
+            try {
+              localStorage.setItem("uni_doc_justifications", JSON.stringify(remoteData.items));
+            } catch (_) {}
+          }
+        }
+        setDocJustificationsLoaded(true);
+      }, (error) => {
+        setDocJustificationsLoaded(true);
+        console.warn("Firestore offline/fallback for doc_justifications:", error);
+      });
+    } catch (_) {
       setDocJustificationsLoaded(true);
-    }, (error) => {
-      setDocJustificationsLoaded(true);
-      handleFirestoreError(error, OperationType.GET, "doc_justifications/all");
-    });
+    }
 
     return () => {
+      clearInterval(intervalId);
+      window.removeEventListener("focus", onWindowFocus);
       unsubscribe();
     };
   }, []);
 
   const handleSaveDocJustification = async (just: LicenseJustification) => {
-    const nextJustifications = [...docJustifications.filter(j => j.id !== just.id), just];
+    // Isolate by plate + documentType + status: only replace the exact same item
+    const nextJustifications = [
+      ...docJustifications.filter(j => {
+        if (j.id === just.id) return false;
+        const samePlate = (j.plate || "").toUpperCase().trim() === (just.plate || "").toUpperCase().trim();
+        const sameDoc = (j.documentType || "").toUpperCase().trim() === (just.documentType || "").toUpperCase().trim();
+        const sameStatus = (j.status || "").toUpperCase().trim() === (just.status || "").toUpperCase().trim();
+        if (samePlate && sameDoc && sameStatus) return false;
+        return true;
+      }),
+      just
+    ];
+
     setDocJustifications(nextJustifications);
+
+    // 1. Local storage
     try {
       localStorage.setItem("uni_doc_justifications", JSON.stringify(nextJustifications));
-      const docRef = doc(db, "doc_justifications", "all");
-      // Sincroniza em segundo plano com timeout para nunca travar a interface
-      Promise.race([
-        setDoc(docRef, {
-          items: nextJustifications,
-          updatedAt: new Date().toISOString()
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout Firestore")), 1500))
-      ]).catch(e => {
-        console.warn("Sincronização remota Firestore (docs) em segundo plano ou offline:", e);
-      });
-      fetch("/api/doc-justifications", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: nextJustifications })
-      }).catch(err => console.warn("Backup to /api/doc-justifications failed:", err));
     } catch (e) {
       console.warn("Erro ao salvar localmente:", e);
     }
+
+    // 2. Server persistence across machines
+    try {
+      await fetch("/api/doc-justifications", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: nextJustifications })
+      });
+    } catch (err) {
+      console.warn("Backup to /api/doc-justifications failed:", err);
+    }
+
+    // 3. Firestore cloud sync
+    try {
+      const docRef = doc(db, "doc_justifications", "all");
+      setDoc(docRef, {
+        items: nextJustifications,
+        updatedAt: new Date().toISOString()
+      }).catch(e => console.warn("Firestore doc sync notice:", e));
+    } catch (_) {}
   };
 
   const handleDeleteDocJustification = async (id: string) => {
@@ -1527,22 +1632,25 @@ export default function App() {
     setDocJustifications(nextJustifications);
     try {
       localStorage.setItem("uni_doc_justifications", JSON.stringify(nextJustifications));
-      const docRef = doc(db, "doc_justifications", "all");
-      Promise.race([
-        setDoc(docRef, {
-          items: nextJustifications,
-          updatedAt: new Date().toISOString()
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout Firestore")), 1500))
-      ]).catch(e => console.warn("Remoção Firestore (docs) em segundo plano:", e));
-      fetch("/api/doc-justifications", {
+    } catch (_) {}
+
+    try {
+      await fetch("/api/doc-justifications", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ items: nextJustifications })
-      }).catch(err => console.warn("Backup to /api/doc-justifications failed:", err));
-    } catch (e) {
-      console.warn("Erro ao remover localmente:", e);
+      });
+    } catch (err) {
+      console.warn("Delete in /api/doc-justifications failed:", err);
     }
+
+    try {
+      const docRef = doc(db, "doc_justifications", "all");
+      setDoc(docRef, {
+        items: nextJustifications,
+        updatedAt: new Date().toISOString()
+      }).catch(e => console.warn("Firestore delete doc notice:", e));
+    } catch (_) {}
   };
 
   const UNI_LOGO = "https://raw.githubusercontent.com/Buenotec/Logo_UNI/refs/heads/main/logo_uni.png"; 
@@ -4871,15 +4979,66 @@ export default function App() {
     const filtered = baseLicFleet.filter(v => 
       matchesLicCity(v) && matchesLicDriver(v) && matchesLicStatus(v) && matchesLicPlate(v) && matchesLicFleet(v) && matchesLicDocType(v) && matchesLicFrequency(v) && matchesLicYearAndMonth(v)
     );
-    return Array.from(new Set(filtered.map(v => v.operation))).filter(Boolean).sort();
+    const result = Array.from(new Set(filtered.map(v => v.operation))).filter(Boolean).sort();
+    return result.length > 0 ? result : Array.from(new Set(baseLicFleet.map(v => v.operation))).filter(Boolean).sort();
   }, [baseLicFleet, matchesLicCity, matchesLicDriver, matchesLicStatus, matchesLicPlate, matchesLicFleet, matchesLicDocType, matchesLicFrequency, matchesLicYearAndMonth]);
 
   const cities = useMemo(() => {
     const filtered = baseLicFleet.filter(v => 
       matchesLicOp(v) && matchesLicDriver(v) && matchesLicStatus(v) && matchesLicPlate(v) && matchesLicFleet(v) && matchesLicDocType(v) && matchesLicFrequency(v) && matchesLicYearAndMonth(v)
     );
-    return Array.from(new Set(filtered.map(v => v.cityBase))).filter(Boolean).sort();
+    const set = new Set<string>();
+    filtered.forEach(v => {
+      if (v.cityBase && v.cityBase.trim()) {
+        set.add(v.cityBase.trim());
+      }
+    });
+    set.add("Ribeirão Preto");
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "pt-BR"));
   }, [baseLicFleet, matchesLicOp, matchesLicDriver, matchesLicStatus, matchesLicPlate, matchesLicFleet, matchesLicDocType, matchesLicFrequency, matchesLicYearAndMonth]);
+
+  // Dedicated operations for Map: ensures all fleet operations are always selectable
+  const mapOperations = useMemo(() => {
+    const set = new Set<string>();
+    fleet.forEach(v => {
+      if (v.operation && v.operation.trim()) {
+        set.add(v.operation.trim());
+      }
+    });
+    ["BAYER MT", "BAYER GO", "CITROSUCO - UBERLANDIA", "CITROSUCO - SÃO PAULO"].forEach(op => set.add(op));
+    return Array.from(set).sort();
+  }, [fleet]);
+
+  // Dedicated cities for Map: includes Ribeirão Preto (Garagem), default operation bases, and dynamically extracts all cities from spreadsheets
+  const mapCities = useMemo(() => {
+    const set = new Set<string>();
+    set.add("Ribeirão Preto");
+    // Localizações padrão das 4 operações caso não preenchidas na planilha
+    set.add("Uberlândia");
+    set.add("São Paulo");
+    set.add("Rio Verde");
+    set.add("Lucas do Rio Verde");
+    fleet.forEach(v => {
+      if (v.cityBase && v.cityBase.trim()) {
+        set.add(v.cityBase.trim());
+      }
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "pt-BR"));
+  }, [fleet]);
+
+  // Dedicated drivers for Map: all available drivers from fleet
+  const mapDrivers = useMemo(() => {
+    const set = new Set<string>();
+    fleet.forEach(v => {
+      if (v.driver && v.driver.trim()) {
+        const d = v.driver.trim();
+        if (d.toUpperCase() !== "DEFENIR" && d.toUpperCase() !== "DEFINIR" && d !== "-") {
+          set.add(d);
+        }
+      }
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "pt-BR"));
+  }, [fleet]);
 
   const drivers = useMemo(() => {
     const filtered = baseLicFleet.filter(v => 
@@ -5188,6 +5347,41 @@ export default function App() {
       });
     }
 
+    // High-performance precomputation: avoid O(N^2) inner array scans and repeated string allocations
+    const lowerSearch = searchTerm ? searchTerm.toLowerCase().trim() : "";
+
+    let allPaidGroupsMap: Map<string, boolean> | null = null;
+    if (isPagos100) {
+      allPaidGroupsMap = new Map();
+      for (let i = 0; i < docBaseFleet.length; i++) {
+        const item = docBaseFleet[i];
+        const key = `${item.plate || ""}#${item.extraData?.["Descrição"] || ""}`;
+        const pag = (item.extraData?.["Pagamento"] || "").toString().trim();
+        const isPaid = pag !== "" && pag !== "-" && !pag.toUpperCase().includes("NAO") && !pag.toUpperCase().includes("NÃO");
+        if (allPaidGroupsMap.has(key)) {
+          if (!isPaid) allPaidGroupsMap.set(key, false);
+        } else {
+          allPaidGroupsMap.set(key, isPaid);
+        }
+      }
+    }
+
+    const opSet = selectedOperation.length > 0 ? new Set(selectedOperation) : null;
+    const citySet = selectedCity.length > 0 ? new Set(selectedCity) : null;
+    const driverSet = selectedDriver.length > 0 ? new Set(selectedDriver) : null;
+    const fleetDocSet = selectedFleetDoc.length > 0 ? new Set(selectedFleetDoc) : null;
+    const plateDocSet = selectedPlateDoc.length > 0 ? new Set(selectedPlateDoc) : null;
+    const descDocSet = selectedDescDoc.length > 0 ? new Set(selectedDescDoc) : null;
+    const obsDocSet = selectedObsDoc.length > 0 ? new Set(selectedObsDoc) : null;
+    const vencDocSet = selectedVencimentoDoc.length > 0 ? new Set(selectedVencimentoDoc) : null;
+    const pagDocSet = selectedPagamentoDoc.length > 0 ? new Set(selectedPagamentoDoc) : null;
+    const parDocSet = selectedParcelaDoc.length > 0 ? new Set(selectedParcelaDoc) : null;
+    const statusDocSet = selectedStatusDoc.length > 0 ? new Set(selectedStatusDoc) : null;
+    const docTypesLicSet = selectedDocTypesLic.length > 0 ? new Set(selectedDocTypesLic) : null;
+    const combinedStatusList = [...selectedStatus, ...selectedStatusDoc];
+    const combinedStatusSet = combinedStatusList.length > 0 ? new Set(combinedStatusList) : null;
+    const statusSet = selectedStatus.length > 0 ? new Set(selectedStatus) : null;
+
     return base.filter(v => {
       // Filter by source based on active tab
       if ((activeTab === "licencas_detalhadas" || activeTab === "financeiro_licencas") && v.source !== "LICENCAS") return false;
@@ -5201,23 +5395,26 @@ export default function App() {
         if (!v.plate || v.plate.trim() === "" || v.plate === "Vázio") return false;
       }
 
-      const matchesSearch = (v.plate || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (v.driver || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (v.operation || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (v.extraData?.["Razão Social"] || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (v.extraData?.["Descrição"] || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (v.extraData?.["Pedido"] || "").toLowerCase().includes(searchTerm.toLowerCase());
+      const matchesSearch = !lowerSearch ||
+        (v.plate && v.plate.toLowerCase().includes(lowerSearch)) ||
+        (v.driver && v.driver.toLowerCase().includes(lowerSearch)) ||
+        (v.operation && v.operation.toLowerCase().includes(lowerSearch)) ||
+        (v.extraData?.["Razão Social"] && String(v.extraData["Razão Social"]).toLowerCase().includes(lowerSearch)) ||
+        (v.extraData?.["Descrição"] && String(v.extraData["Descrição"]).toLowerCase().includes(lowerSearch)) ||
+        (v.extraData?.["Pedido"] && String(v.extraData["Pedido"]).toLowerCase().includes(lowerSearch));
       
-      if (activeTab === "financeiro_licencas") {
-        const matchesOperation = selectedOperation.length === 0 || selectedOperation.includes(v.operation);
-        const matchesCity = selectedCity.length === 0 || selectedCity.includes(v.cityBase);
-        const matchesDriver = selectedDriver.length === 0 || selectedDriver.includes(v.driver);
+      if (!matchesSearch) return false;
 
-        const matchesFleet = selectedFleetDoc.length === 0 || selectedFleetDoc.includes(v.fleet || "Vázio");
-        const matchesPlate = selectedPlateDoc.length === 0 || selectedPlateDoc.includes(v.plate || "Vázio");
-        const matchesDesc = selectedDescDoc.length === 0 || selectedDescDoc.includes(v.extraData?.["Descrição"]) || (v.documents && v.documents.some(doc => selectedDescDoc.includes(doc.type)));
+      if (activeTab === "financeiro_licencas") {
+        const matchesOperation = !opSet || opSet.has(v.operation);
+        const matchesCity = !citySet || citySet.has(v.cityBase);
+        const matchesDriver = !driverSet || driverSet.has(v.driver);
+
+        const matchesFleet = !fleetDocSet || fleetDocSet.has(v.fleet || "Vázio");
+        const matchesPlate = !plateDocSet || plateDocSet.has(v.plate || "Vázio");
+        const matchesDesc = !descDocSet || descDocSet.has(v.extraData?.["Descrição"]) || (v.documents && v.documents.some(doc => descDocSet.has(doc.type)));
         
-        const matchesDocType = selectedDocTypesLic.length === 0 || (v.documents && v.documents.some(doc => selectedDocTypesLic.includes(doc.type)));
+        const matchesDocType = !docTypesLicSet || (v.documents && v.documents.some(doc => docTypesLicSet.has(doc.type)));
 
         const matchesFrequency = selectedFrequencyLic.length === 0 || (v.documents && v.documents.some(doc => {
           let freq = doc.validityPeriod?.trim();
@@ -5232,63 +5429,56 @@ export default function App() {
           return selectedFrequencyLic.includes(normalizeFrequencyString(freq || ""));
         }));
 
-        const combinedStatus = [...selectedStatus, ...selectedStatusDoc];
-        const matchesStatus = combinedStatus.length === 0 || 
-          combinedStatus.includes(v.overallStatus) || 
-          (combinedStatus.includes('em_aberto') && isEmAbertoDoc(v)) ||
-          (combinedStatus.includes('pagos') && isPagoDoc(v)) ||
-          (combinedStatus.includes('vencido') && isVencidoDoc(v)) ||
-          (combinedStatus.includes('ok') && v.overallStatus === 'ok') ||
-          (combinedStatus.includes('atencao') && v.overallStatus === 'atencao') ||
-          (combinedStatus.includes('critico') && v.overallStatus === 'critico');
+        const matchesStatus = !combinedStatusSet || 
+          combinedStatusSet.has(v.overallStatus) || 
+          (combinedStatusSet.has('em_aberto') && isEmAbertoDoc(v)) ||
+          (combinedStatusSet.has('pagos') && isPagoDoc(v)) ||
+          (combinedStatusSet.has('vencido') && isVencidoDoc(v)) ||
+          (combinedStatusSet.has('ok') && v.overallStatus === 'ok') ||
+          (combinedStatusSet.has('atencao') && v.overallStatus === 'atencao') ||
+          (combinedStatusSet.has('critico') && v.overallStatus === 'critico');
 
         const matchesYearAndMonth = matchesLicYearAndMonth(v);
 
-        return matchesSearch && matchesOperation && matchesCity && matchesDriver && matchesFleet && matchesPlate && matchesDesc && matchesDocType && matchesFrequency && matchesStatus && matchesYearAndMonth;
+        return matchesOperation && matchesCity && matchesDriver && matchesFleet && matchesPlate && matchesDesc && matchesDocType && matchesFrequency && matchesStatus && matchesYearAndMonth;
       }
 
       if (activeTab === "licencas_documentos" || activeTab === "financeiro_docs" || (activeTab === "dashboard" && activeDashboardSubTab === "documentacao")) {
-        const matchesFleet = selectedFleetDoc.length === 0 || selectedFleetDoc.includes(v.fleet || "Vázio");
-        const matchesPlate = selectedPlateDoc.length === 0 || selectedPlateDoc.includes(v.plate || "Vázio");
-        const matchesDesc = selectedDescDoc.length === 0 || selectedDescDoc.includes(v.extraData?.["Descrição"]) || (v.documents && v.documents.some(doc => selectedDescDoc.includes(doc.type)));
-        const matchesObs = selectedObsDoc.length === 0 || selectedObsDoc.includes(v.extraData?.["Observações"]);
-        const matchesVenc = selectedVencimentoDoc.length === 0 || selectedVencimentoDoc.includes(v.extraData?.["Vencimento"] ? formatBRDate(v.extraData?.["Vencimento"]) : "Vázio");
-        const matchesPag = selectedPagamentoDoc.length === 0 || selectedPagamentoDoc.includes(v.extraData?.["Pagamento"] ? formatBRDate(v.extraData?.["Pagamento"]) : "Vázio");
-        const matchesPar = selectedParcelaDoc.length === 0 || selectedParcelaDoc.includes(v.extraData?.["Parcela"]);
-        const matchesStatus = selectedStatusDoc.length === 0 || 
-          selectedStatusDoc.includes(v.overallStatus) || 
-          (selectedStatusDoc.includes('em_aberto') && isEmAbertoDoc(v)) ||
-          (selectedStatusDoc.includes('pagos') && isPagoDoc(v)) ||
-          (selectedStatusDoc.includes('vencido') && isVencidoDoc(v));
+        const matchesFleet = !fleetDocSet || fleetDocSet.has(v.fleet || "Vázio");
+        const matchesPlate = !plateDocSet || plateDocSet.has(v.plate || "Vázio");
+        const matchesDesc = !descDocSet || descDocSet.has(v.extraData?.["Descrição"]) || (v.documents && v.documents.some(doc => descDocSet.has(doc.type)));
+        const matchesObs = !obsDocSet || obsDocSet.has(v.extraData?.["Observações"]);
+        const matchesVenc = !vencDocSet || vencDocSet.has(v.extraData?.["Vencimento"] ? formatBRDate(v.extraData?.["Vencimento"]) : "Vázio");
+        const matchesPag = !pagDocSet || pagDocSet.has(v.extraData?.["Pagamento"] ? formatBRDate(v.extraData?.["Pagamento"]) : "Vázio");
+        const matchesPar = !parDocSet || parDocSet.has(v.extraData?.["Parcela"]);
+        const matchesStatus = !statusDocSet || 
+          statusDocSet.has(v.overallStatus) || 
+          (statusDocSet.has('em_aberto') && isEmAbertoDoc(v)) ||
+          (statusDocSet.has('pagos') && isPagoDoc(v)) ||
+          (statusDocSet.has('vencido') && isVencidoDoc(v));
         
         let matchesPago100 = true;
-        if (isPagos100) {
-          const plate = v.plate;
-          const desc = v.extraData?.["Descrição"];
-          const group = docBaseFleet.filter(item => item.plate === plate && item.extraData?.["Descrição"] === desc);
-          const allPaid = group.every(item => {
-            const pag = (item.extraData?.["Pagamento"] || "").toString().trim();
-            return pag !== "" && pag !== "-" && !pag.toUpperCase().includes("NAO") && !pag.toUpperCase().includes("NÃO");
-          });
-          matchesPago100 = allPaid;
+        if (isPagos100 && allPaidGroupsMap) {
+          const key = `${v.plate || ""}#${v.extraData?.["Descrição"] || ""}`;
+          matchesPago100 = allPaidGroupsMap.get(key) ?? false;
         }
         
-        return matchesSearch && matchesFleet && matchesPlate && matchesDesc && matchesObs && matchesVenc && matchesPag && matchesPar && matchesStatus && matchesPago100;
+        return matchesFleet && matchesPlate && matchesDesc && matchesObs && matchesVenc && matchesPag && matchesPar && matchesStatus && matchesPago100;
       }
 
-      const matchesOperation = selectedOperation.length === 0 || selectedOperation.includes(v.operation);
-      const matchesStatus = selectedStatus.length === 0 || 
-        selectedStatus.includes(v.overallStatus) ||
-        (selectedStatus.includes('em_aberto') && isEmAbertoDoc(v)) ||
-        (selectedStatus.includes('pagos') && isPagoDoc(v)) ||
-        (selectedStatus.includes('vencido') && isVencidoDoc(v)) ||
-        (selectedStatus.includes('ok') && v.overallStatus === 'ok') ||
-        (selectedStatus.includes('atencao') && v.overallStatus === 'atencao') ||
-        (selectedStatus.includes('critico') && v.overallStatus === 'critico');
-      const matchesCity = selectedCity.length === 0 || selectedCity.includes(v.cityBase);
-      const matchesDriver = selectedDriver.length === 0 || selectedDriver.includes(v.driver);
+      const matchesOperation = !opSet || opSet.has(v.operation);
+      const matchesStatus = !statusSet || 
+        statusSet.has(v.overallStatus) ||
+        (statusSet.has('em_aberto') && isEmAbertoDoc(v)) ||
+        (statusSet.has('pagos') && isPagoDoc(v)) ||
+        (statusSet.has('vencido') && isVencidoDoc(v)) ||
+        (statusSet.has('ok') && v.overallStatus === 'ok') ||
+        (statusSet.has('atencao') && v.overallStatus === 'atencao') ||
+        (statusSet.has('critico') && v.overallStatus === 'critico');
+      const matchesCity = !citySet || citySet.has(v.cityBase);
+      const matchesDriver = !driverSet || driverSet.has(v.driver);
       
-      return matchesSearch && matchesOperation && matchesStatus && matchesCity && matchesDriver;
+      return matchesOperation && matchesStatus && matchesCity && matchesDriver;
     });
   }, [fleet, docBaseFleet, searchTerm, selectedOperation, selectedStatus, selectedCity, selectedDriver, selectedDocTypesLic, selectedFrequencyLic, selectedEmpresa, selectedRazaoSocial, selectedEstado, selectedFleetDoc, selectedPlateDoc, selectedDescDoc, selectedObsDoc, selectedVencimentoDoc, selectedPagamentoDoc, selectedParcelaDoc, selectedStatusDoc, isPagos100, activeTab, activeDashboardSubTab, exibirDocsSemPlaca, matchesLicYearAndMonth]);
 
@@ -6121,79 +6311,44 @@ export default function App() {
         </div>
 
         <nav className={cn(
-          "flex-1 overflow-y-auto sidebar-scroll overflow-x-hidden transition-all duration-300",
-          isSidebarOpen ? "p-4 space-y-2" : "py-4 px-2 space-y-2.5 flex flex-col items-center"
+          "flex-1 overflow-y-auto sidebar-scroll transition-all duration-300",
+          isSidebarOpen ? "p-4 space-y-2 overflow-x-hidden" : "py-4 px-2 space-y-2.5 flex flex-col items-center overflow-visible"
         )}>
           {/* Botões de Tema: LIGHT e DARK (inseridos diretamente acima de Dashboard Licenças) */}
           <div className={cn("mb-3 transition-all duration-300", !isSidebarOpen && "w-full flex justify-center")}>
             {isSidebarOpen ? (
               <div className="bg-slate-200/80 dark:bg-slate-800/90 p-1.5 rounded-2xl border border-slate-300/70 dark:border-slate-700/80 flex items-center gap-1 shadow-inner">
-                <button 
+                <motion.button 
                   type="button"
+                  whileTap={{ scale: 0.95, y: 1 }}
                   onClick={() => setTheme("light")}
                   className={cn(
                     "flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-black transition-all duration-300 cursor-pointer",
                     theme === "light" 
-                      ? "bg-white text-blue-600 shadow-md shadow-slate-300/40 border border-slate-200/80 scale-[1.02]" 
+                      ? "bg-white text-blue-600 shadow-[inset_0_2px_4px_rgba(0,0,0,0.1),0_2px_4px_rgba(0,0,0,0.05)] border border-slate-200/80 scale-[1.02] translate-y-[1px]" 
                       : "text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
                   )}
                 >
                   <Sun size={16} className={cn("transition-transform duration-300", theme === "light" && "text-amber-500 fill-amber-400 scale-110")} />
                   <span>LIGHT</span>
-                </button>
-                <button 
+                </motion.button>
+                <motion.button 
                   type="button"
+                  whileTap={{ scale: 0.95, y: 1 }}
                   onClick={() => setTheme("dark")}
                   className={cn(
                     "flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-black transition-all duration-300 cursor-pointer",
                     theme === "dark" 
-                      ? "bg-slate-900 text-cyan-400 shadow-md shadow-slate-950/60 border border-slate-700 scale-[1.02]" 
+                      ? "bg-slate-900 text-cyan-400 shadow-[inset_0_2px_6px_rgba(0,0,0,0.8),0_0_12px_rgba(6,182,212,0.3)] border border-slate-700 scale-[1.02] translate-y-[1px]" 
                       : "text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
                   )}
                 >
                   <Moon size={16} className={cn("transition-transform duration-300", theme === "dark" && "text-cyan-400 fill-cyan-400/30 scale-110")} />
                   <span>DARK</span>
-                </button>
+                </motion.button>
               </div>
             ) : (
-              <div className="flex flex-col items-center gap-1 p-1 bg-slate-200/80 dark:bg-slate-800/90 rounded-2xl border border-slate-300/70 dark:border-slate-700/80 shadow-inner w-11 mx-auto relative group">
-                <button 
-                  type="button"
-                  onClick={() => setTheme("light")}
-                  title="Tema Claro (LIGHT)"
-                  className={cn(
-                    "w-9 h-9 rounded-xl transition-all duration-200 flex items-center justify-center cursor-pointer",
-                    theme === "light" 
-                      ? "bg-white text-amber-500 shadow-md scale-105" 
-                      : "text-slate-400 hover:text-amber-500 hover:bg-white/50 dark:hover:bg-slate-700/50"
-                  )}
-                >
-                  <Sun size={18} />
-                </button>
-                <button 
-                  type="button"
-                  onClick={() => setTheme("dark")}
-                  title="Tema Escuro (DARK)"
-                  className={cn(
-                    "w-9 h-9 rounded-xl transition-all duration-200 flex items-center justify-center cursor-pointer",
-                    theme === "dark" 
-                      ? "bg-slate-950 text-cyan-400 shadow-md shadow-cyan-950/50 border border-cyan-500/40 scale-105" 
-                      : "text-slate-400 hover:text-cyan-400 hover:bg-white/50 dark:hover:bg-slate-700/50"
-                  )}
-                >
-                  <Moon size={18} />
-                </button>
-
-                {/* Tooltip do Tema no modo recolhido */}
-                <div className="absolute left-full ml-3.5 top-1/2 -translate-y-1/2 z-50 pointer-events-none opacity-0 group-hover:opacity-100 -translate-x-2 group-hover:translate-x-0 transition-all duration-200 ease-out whitespace-nowrap">
-                  <div className="relative py-2 px-3 rounded-xl bg-[#080d1a]/95 backdrop-blur-xl border border-cyan-400/50 shadow-[0_10px_25px_-5px_rgba(0,0,0,0.8),0_0_20px_rgba(6,182,212,0.4),inset_0_1px_1px_rgba(255,255,255,0.2)] text-white flex items-center gap-2">
-                    <span className="text-xs font-display font-black tracking-wide uppercase text-slate-100">
-                      Tema: {theme === "dark" ? "Escuro (Dark)" : "Claro (Light)"}
-                    </span>
-                  </div>
-                  <div className="absolute top-1/2 -left-1 -translate-y-1/2 w-2 h-2 bg-[#080d1a] border-l border-b border-cyan-400/50 transform rotate-45" />
-                </div>
-              </div>
+              <CollapsedThemeToggle theme={theme} setTheme={setTheme} />
             )}
           </div>
 
@@ -6219,7 +6374,7 @@ export default function App() {
             collapsed={!isSidebarOpen}
           />
           <NavItem 
-            icon={<LayoutDashboard size={22} />} 
+            icon={<BarChart3 size={22} />} 
             label="Dashboard Documentação" 
             active={activeTab === "dashboard" && activeDashboardSubTab === "documentacao"} 
             onClick={() => {
@@ -6250,7 +6405,7 @@ export default function App() {
             collapsed={!isSidebarOpen}
           />
           <NavItem 
-            icon={<DollarSign size={22} />} 
+            icon={<Receipt size={22} />} 
             label="Financeiro - Docs" 
             active={activeTab === "financeiro_docs"} 
             onClick={() => setActiveTab("financeiro_docs")}
@@ -7073,70 +7228,12 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* Operation Distribution */}
-                      <ChartContainer3D
-                        title="Distribuição por Operação"
-                        subtitle="Veículos por Base Operacional"
-                        legendBadge="VEÍCULOS"
-                        badgeColor="#38bdf8"
+                      {/* Operation Distribution with Hierarchy Levels */}
+                      <OperationDistributionChart
+                        vehicles={filteredDashboardLicFleet}
+                        operations={operations}
                         className="lg:col-span-5"
-                      >
-                        {filteredDashboardLicFleet.length > 0 ? (
-                          <ResponsiveContainer width="100%" height="100%">
-                            <ComposedChart 
-                              data={operations.filter(op => filteredDashboardLicFleet.some(v => v.operation === op)).map(op => ({
-                                name: op,
-                                count: filteredDashboardLicFleet.filter(v => v.operation === op).length,
-                                total: filteredDashboardLicFleet.length
-                              }))}
-                              margin={{ top: 22, right: 12, left: -22, bottom: 44 }}
-                            >
-                              <defs>
-                                <linearGradient id="neonBarGradientLic" x1="0" y1="0" x2="0" y2="1">
-                                  <stop offset="0%" stopColor="#38bdf8" stopOpacity={0.95}/>
-                                  <stop offset="50%" stopColor="#2563eb" stopOpacity={0.65}/>
-                                  <stop offset="100%" stopColor="#1e3a8a" stopOpacity={0.15}/>
-                                </linearGradient>
-                                <filter id="neonSplineGlowLic" x="-20%" y="-40%" width="140%" height="180%">
-                                  <feGaussianBlur stdDeviation="3.5" result="coloredBlur"/>
-                                  <feMerge>
-                                    <feMergeNode in="coloredBlur"/>
-                                    <feMergeNode in="SourceGraphic"/>
-                                  </feMerge>
-                                </filter>
-                              </defs>
-                              <CartesianGrid strokeDasharray="4 4" vertical={false} stroke="rgba(255, 255, 255, 0.08)" />
-                              <XAxis 
-                                dataKey="name" 
-                                axisLine={false} 
-                                tickLine={false} 
-                                tick={{ fontSize: 9, fill: '#94a3b8', fontWeight: 700 }}
-                                interval={0}
-                                angle={-35}
-                                textAnchor="end"
-                              />
-                              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#64748b', fontWeight: 600 }} />
-                              <Tooltip 
-                                content={<ChartTooltip3D unit="veículos" />}
-                                cursor={<AnimatedChartCursor />}
-                              />
-                              <Bar dataKey="count" radius={[8, 8, 0, 0]} barSize={28} fill="url(#neonBarGradientLic)" stroke="#38bdf8" strokeWidth={1}>
-                                <LabelList dataKey="count" position="top" style={{ fontSize: '10px', fontWeight: '900', fill: '#60a5fa' }} />
-                              </Bar>
-                              <Line 
-                                type="monotone" 
-                                dataKey="count" 
-                                stroke="#818cf8" 
-                                strokeWidth={3} 
-                                dot={{ r: 4.5, fill: '#ffffff', strokeWidth: 2.5, stroke: '#6366f1' }} 
-                                activeDot={{ r: 7, fill: '#38bdf8', stroke: '#ffffff', strokeWidth: 2 }} 
-                              />
-                            </ComposedChart>
-                          </ResponsiveContainer>
-                        ) : (
-                          <div className="h-full flex items-center justify-center text-slate-400 text-sm">Nenhum dado disponível</div>
-                        )}
-                      </ChartContainer3D>
+                      />
 
                       {/* Status Summary Chart */}
                       <ChartContainer3D
@@ -10926,75 +11023,91 @@ export default function App() {
                 className="h-full glass-card rounded-3xl relative overflow-hidden flex flex-col"
               >
                 {/* Toggle Filters Button */}
-                <div className="absolute top-4 right-4 z-[1001] flex flex-col gap-2 pointer-events-none">
+                <div className="absolute top-4 right-4 z-[4001] flex items-center gap-2 pointer-events-none">
                   <button 
                     onClick={() => setShowMapFilters(!showMapFilters)}
-                    className="p-3 bg-white/80 backdrop-blur-md border border-slate-200 rounded-2xl shadow-xl text-slate-600 hover:text-blue-600 hover:border-blue-300 transition-all group pointer-events-auto"
-                    title={showMapFilters ? "Ocultar Filtros" : "Mostrar Filtros"}
+                    className="flex items-center gap-2 px-3.5 py-2.5 bg-slate-900/90 text-white backdrop-blur-md border border-slate-700/80 rounded-2xl shadow-xl hover:bg-blue-600 hover:border-blue-500 transition-all group pointer-events-auto cursor-pointer"
+                    title={showMapFilters ? "Ocultar Painel de Filtros" : "Mostrar Painel de Filtros"}
                   >
-                    {showMapFilters ? <EyeOff size={20} /> : <Eye size={20} />}
+                    {showMapFilters ? <EyeOff size={16} className="text-blue-400 group-hover:text-white" /> : <Eye size={16} className="text-blue-400 group-hover:text-white" />}
+                    <span className="text-xs font-bold uppercase tracking-wider hidden sm:inline">
+                      {showMapFilters ? "Ocultar Filtros" : "Filtros"}
+                    </span>
                   </button>
                 </div>
 
-                {/* Map Filters Bar - Refined Glass Style */}
+                {/* Map Filters Bar - Refined Glass Style with High Visibility & Dropdown Popout */}
                 <AnimatePresence>
                   {showMapFilters && (
                     <motion.div 
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: "auto", opacity: 1 }}
-                      exit={{ height: 0, opacity: 0 }}
-                      className="overflow-hidden bg-white/40 border-b border-white/20 backdrop-blur-xl z-10"
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -10 }}
+                      transition={{ duration: 0.2 }}
+                      className="relative z-[4000] bg-slate-900/95 border-b border-slate-700/80 backdrop-blur-2xl shadow-2xl overflow-visible"
+                      style={{ overflow: "visible" }}
                     >
-                      <div className="p-5">
-                        <div className="flex flex-col lg:flex-row gap-6 items-end">
-                          <div className="flex-1 grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4 w-full">
+                      <div className="p-5 overflow-visible">
+                        <div className="flex flex-col lg:flex-row gap-6 items-end overflow-visible">
+                          <div className="flex-1 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-4 w-full overflow-visible">
                             <MultiSelect 
                               label="Operação"
-                              options={operations}
+                              options={mapOperations}
                               selected={selectedOperation}
                               onChange={setSelectedOperation}
                               placeholder="Todas as Operações"
                             />
                             <MultiSelect 
                               label="Cidade / Base"
-                              options={cities}
+                              options={mapCities}
                               selected={selectedCity}
                               onChange={setSelectedCity}
                               placeholder="Todas as Cidades"
                             />
+                            <MultiSelect 
+                              label="Motorista"
+                              options={mapDrivers}
+                              selected={selectedDriver}
+                              onChange={setSelectedDriver}
+                              placeholder="Todos os Motoristas"
+                            />
                             
-                            {/* Route Simulation Section */}
-                            <div className="md:col-span-3 grid grid-cols-1 md:grid-cols-3 gap-4 bg-blue-50/30 p-3 rounded-[2rem] border border-blue-100/50">
+                            {/* Route Simulation Section - High contrast & visibility */}
+                            <div className="md:col-span-2 lg:col-span-3 grid grid-cols-1 md:grid-cols-3 gap-4 bg-slate-800/90 p-3.5 rounded-[2rem] border border-blue-500/30 shadow-lg shadow-black/20">
                               <div className="space-y-1.5">
-                                <label className="text-[10px] font-black text-blue-600 uppercase tracking-widest ml-1">Rota: Origem</label>
+                                <label className="text-[10px] font-black text-blue-400 uppercase tracking-widest ml-1 flex items-center gap-1">
+                                  <span>Rota: Origem</span>
+                                </label>
                                 <select 
                                   value={originCity}
                                   onChange={(e) => setOriginCity(e.target.value)}
-                                  className="w-full bg-white/80 border border-blue-100 rounded-2xl px-4 py-2.5 text-xs font-bold outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all shadow-sm"
+                                  className="w-full bg-slate-900 text-slate-100 border border-slate-700 rounded-2xl px-4 py-2.5 text-xs font-bold outline-none focus:ring-4 focus:ring-blue-500/30 focus:border-blue-400 transition-all shadow-md cursor-pointer hover:border-blue-400/60"
                                 >
-                                  <option value="">Selecione Origem</option>
-                                  {cities.map(city => (
-                                    <option key={city} value={city}>{city}</option>
+                                  <option value="" className="bg-slate-900 text-slate-400">Selecione Origem</option>
+                                  {mapCities.map(city => (
+                                    <option key={city} value={city} className="bg-slate-900 text-slate-100">{city}</option>
                                   ))}
                                 </select>
                               </div>
                               <div className="space-y-1.5">
-                                <label className="text-[10px] font-black text-blue-600 uppercase tracking-widest ml-1">Destino</label>
+                                <label className="text-[10px] font-black text-blue-400 uppercase tracking-widest ml-1 flex items-center gap-1">
+                                  <span>Destino</span>
+                                </label>
                                 <select 
                                   value={destinationCity}
                                   onChange={(e) => setDestinationCity(e.target.value)}
-                                  className="w-full bg-white/80 border border-blue-100 rounded-2xl px-4 py-2.5 text-xs font-bold outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all shadow-sm"
+                                  className="w-full bg-slate-900 text-slate-100 border border-slate-700 rounded-2xl px-4 py-2.5 text-xs font-bold outline-none focus:ring-4 focus:ring-blue-500/30 focus:border-blue-400 transition-all shadow-md cursor-pointer hover:border-blue-400/60"
                                 >
-                                  <option value="">Selecione Destino</option>
-                                  {cities.map(city => (
-                                    <option key={city} value={city}>{city}</option>
+                                  <option value="" className="bg-slate-900 text-slate-400">Selecione Destino</option>
+                                  {mapCities.map(city => (
+                                    <option key={city} value={city} className="bg-slate-900 text-slate-100">{city}</option>
                                   ))}
                                 </select>
                               </div>
                               <div className="flex items-end gap-2">
-                                <div className="flex-1 bg-slate-900 text-white rounded-2xl px-4 py-2.5 flex flex-col justify-center shadow-xl shadow-slate-200">
-                                  <span className="text-[8px] font-black opacity-50 uppercase tracking-tighter">Distância Estimada</span>
-                                  <span className="text-sm font-black">{routeDistance ? `${routeDistance} KM` : "---"}</span>
+                                <div className="flex-1 bg-slate-950 border border-slate-800 text-white rounded-2xl px-4 py-2.5 flex flex-col justify-center shadow-xl">
+                                  <span className="text-[8px] font-black text-slate-400 uppercase tracking-tighter">Distância Estimada</span>
+                                  <span className="text-sm font-black text-blue-400">{routeDistance ? `${routeDistance} KM` : "---"}</span>
                                 </div>
                                 <button 
                                   onClick={() => {
@@ -11002,7 +11115,7 @@ export default function App() {
                                     setDestinationCity("");
                                     setRouteDistance(null);
                                   }}
-                                  className="p-3 bg-white text-slate-400 rounded-2xl hover:text-red-500 hover:shadow-md transition-all border border-slate-100"
+                                  className="p-3 bg-slate-800 text-slate-300 rounded-2xl hover:text-red-400 hover:bg-slate-700 hover:shadow-md transition-all border border-slate-700 cursor-pointer"
                                   title="Limpar Rota"
                                 >
                                   <RefreshCw size={16} />
@@ -11024,6 +11137,24 @@ export default function App() {
                   originCity={originCity}
                   destinationCity={destinationCity}
                   setRouteDistance={setRouteDistance}
+                  onSelectOperation={(op) => {
+                    if (!op) {
+                      setSelectedOperation([]);
+                    } else if (selectedOperation.includes(op)) {
+                      setSelectedOperation(selectedOperation.filter(o => o !== op));
+                    } else {
+                      setSelectedOperation([...selectedOperation, op]);
+                    }
+                  }}
+                  onResetFilters={() => {
+                    setSelectedOperation([]);
+                    setSelectedCity([]);
+                    setSelectedStatus([]);
+                    setSelectedDriver([]);
+                    setOriginCity("");
+                    setDestinationCity("");
+                    setRouteDistance(null);
+                  }}
                 />
               </motion.div>
             )}
@@ -11050,6 +11181,94 @@ export default function App() {
   );
 }
 
+function CollapsedThemeToggle({ 
+  theme, 
+  setTheme 
+}: { 
+  theme: "light" | "dark"; 
+  setTheme: (theme: "light" | "dark") => void; 
+}) {
+  const [hoveredButton, setHoveredButton] = useState<"light" | "dark" | null>(null);
+  const [coords, setCoords] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  const lightRef = useRef<HTMLButtonElement>(null);
+  const darkRef = useRef<HTMLButtonElement>(null);
+
+  const handleMouseEnter = (type: "light" | "dark") => {
+    const el = type === "light" ? lightRef.current : darkRef.current;
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      setCoords({
+        top: rect.top + rect.height / 2,
+        left: rect.right + 12
+      });
+    }
+    setHoveredButton(type);
+  };
+
+  return (
+    <>
+      <div className="flex flex-col items-center gap-1 p-1 bg-slate-200/80 dark:bg-slate-800/90 rounded-2xl border border-slate-300/70 dark:border-slate-700/80 shadow-inner w-11 mx-auto relative select-none">
+        <motion.button 
+          ref={lightRef}
+          type="button"
+          whileTap={{ scale: 0.92, y: 1 }}
+          onClick={() => setTheme("light")}
+          onMouseEnter={() => handleMouseEnter("light")}
+          onMouseLeave={() => setHoveredButton(null)}
+          className={cn(
+            "w-9 h-9 rounded-xl transition-all duration-200 flex items-center justify-center cursor-pointer",
+            theme === "light" 
+              ? "bg-white text-amber-500 shadow-md scale-105" 
+              : "text-slate-400 hover:text-amber-500 hover:bg-white/50 dark:hover:bg-slate-700/50"
+          )}
+        >
+          <Sun size={18} />
+        </motion.button>
+        <motion.button 
+          ref={darkRef}
+          type="button"
+          whileTap={{ scale: 0.92, y: 1 }}
+          onClick={() => setTheme("dark")}
+          onMouseEnter={() => handleMouseEnter("dark")}
+          onMouseLeave={() => setHoveredButton(null)}
+          className={cn(
+            "w-9 h-9 rounded-xl transition-all duration-200 flex items-center justify-center cursor-pointer",
+            theme === "dark" 
+              ? "bg-slate-950 text-cyan-400 shadow-md shadow-cyan-950/50 border border-cyan-500/40 scale-105" 
+              : "text-slate-400 hover:text-cyan-400 hover:bg-white/50 dark:hover:bg-slate-700/50"
+          )}
+        >
+          <Moon size={18} />
+        </motion.button>
+      </div>
+
+      <PortalTooltip 
+        isOpen={hoveredButton !== null} 
+        coords={coords}
+        accentColor={hoveredButton === "light" ? "amber" : "cyan"}
+      >
+        <span className={cn(
+          "w-1.5 h-1.5 rounded-full shadow-[0_0_6px]", 
+          hoveredButton === "light" ? "bg-amber-400 shadow-amber-400" : "bg-cyan-400 shadow-cyan-400"
+        )} />
+        <span className="text-xs font-display font-black tracking-wide uppercase text-slate-100 drop-shadow-sm">
+          {hoveredButton === "light" ? "Tema Claro (Light)" : "Tema Escuro (Dark)"}
+        </span>
+        {((hoveredButton === "light" && theme === "light") || (hoveredButton === "dark" && theme === "dark")) && (
+          <span className={cn(
+            "px-1.5 py-0.2 rounded text-[8px] font-mono font-bold border",
+            theme === "light" 
+              ? "bg-amber-500/20 text-amber-300 border-amber-400/40 shadow-[0_0_6px_rgba(245,158,11,0.3)]" 
+              : "bg-cyan-500/20 text-cyan-300 border-cyan-400/40 shadow-[0_0_6px_rgba(6,182,212,0.3)]"
+          )}>
+            ATIVO
+          </span>
+        )}
+      </PortalTooltip>
+    </>
+  );
+}
+
 function NavItem({ 
   icon, 
   label, 
@@ -11063,79 +11282,129 @@ function NavItem({
   onClick: () => void; 
   collapsed: boolean;
 }) {
+  const [isHovered, setIsHovered] = useState(false);
+  const [coords, setCoords] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  const buttonRef = useRef<HTMLButtonElement>(null);
+
+  const handleMouseEnter = () => {
+    if (buttonRef.current) {
+      const rect = buttonRef.current.getBoundingClientRect();
+      setCoords({
+        top: rect.top + rect.height / 2,
+        left: rect.right + 12
+      });
+    }
+    setIsHovered(true);
+  };
+
+  const handleMouseLeave = () => {
+    setIsHovered(false);
+  };
+
   return (
-    <button 
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "transition-all duration-300 relative group cursor-pointer select-none",
-        collapsed
-          ? "w-11 h-11 rounded-2xl flex items-center justify-center mx-auto"
-          : "w-full flex items-center gap-3.5 p-3 rounded-2xl text-left",
-        active 
-          ? collapsed
-            ? "bg-slate-900/95 dark:bg-slate-900/95 text-white shadow-[0_0_20px_rgba(6,182,212,0.5),inset_0_1px_2px_rgba(255,255,255,0.25)] border border-cyan-400/80 scale-[1.03]"
-            : "bg-gradient-to-r from-slate-900/95 via-cyan-950/70 to-slate-900/95 dark:from-slate-900/95 dark:via-cyan-950/70 dark:to-slate-900/95 text-white border border-cyan-400/80 shadow-[0_0_22px_rgba(6,182,212,0.4),inset_0_1px_2px_rgba(255,255,255,0.2)] font-black"
-          : "text-slate-600 dark:text-slate-400 hover:bg-slate-100/80 dark:hover:bg-slate-800/80 hover:text-slate-900 dark:hover:text-cyan-300 hover:border-slate-300/60 dark:hover:border-slate-700/60 hover:shadow-sm border border-transparent"
-      )}
-    >
-      {/* Indicador Neon ativo no modo recolhido e expandido */}
-      {active && (
-        <span className="absolute -left-1 top-1/2 -translate-y-1/2 w-1.5 h-6 bg-cyan-400 rounded-r-full shadow-[0_0_10px_#22d3ee]" />
-      )}
+    <>
+      <motion.button 
+        ref={buttonRef}
+        type="button"
+        onClick={onClick}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+        whileHover={!active ? { y: -1, transition: { duration: 0.15 } } : {}}
+        whileTap={{ scale: 0.965, y: 3 }}
+        animate={{
+          y: active ? 2 : 0,
+          scale: active ? 0.99 : 1,
+        }}
+        transition={{ type: "spring", stiffness: 450, damping: 26, mass: 0.7 }}
+        className={cn(
+          "transition-colors duration-200 relative group cursor-pointer select-none outline-none overflow-hidden",
+          collapsed
+            ? "w-11 h-11 rounded-2xl flex items-center justify-center mx-auto"
+            : "w-full flex items-center gap-3.5 p-3 rounded-2xl text-left",
+          active 
+            ? collapsed
+              ? "bg-gradient-to-b from-slate-950 via-slate-900 to-cyan-950/80 text-white border-2 border-cyan-400 shadow-[inset_0_4px_10px_rgba(0,0,0,0.92),inset_0_-1px_2px_rgba(255,255,255,0.18),0_0_22px_rgba(6,182,212,0.6)]"
+              : "bg-gradient-to-b from-slate-950 via-slate-900/95 to-slate-950 dark:from-black/90 dark:via-slate-950/95 dark:to-cyan-950/40 text-white border border-cyan-400/90 shadow-[inset_0_5px_12px_rgba(0,0,0,0.94),inset_0_-1px_2px_rgba(255,255,255,0.16),0_0_24px_rgba(6,182,212,0.45)] font-black"
+            : "bg-gradient-to-b from-slate-800/30 via-slate-900/20 to-slate-950/40 text-slate-600 dark:text-slate-400 border border-slate-700/40 dark:border-slate-800/80 shadow-[0_3px_6px_-1px_rgba(0,0,0,0.35),inset_0_1px_1px_rgba(255,255,255,0.08)] hover:text-slate-900 dark:hover:text-cyan-300 hover:border-cyan-500/60 hover:from-slate-800/70 hover:to-slate-900/90 hover:shadow-[0_6px_16px_-2px_rgba(6,182,212,0.3),inset_0_1px_1px_rgba(255,255,255,0.18)]"
+        )}
+      >
+        {/* Animação 3D do Feixe Laser Neon passando pelo botão */}
+        <NeonLaserBeam 
+          active={active} 
+          showOnHover={true}
+          roundedClass="rounded-2xl" 
+          accentColor="cyan" 
+        />
 
-      <div className={cn(
-        "shrink-0 flex items-center justify-center transition-all duration-300", 
-        active 
-          ? "scale-110 text-cyan-400 drop-shadow-[0_0_8px_rgba(34,211,238,0.85)]" 
-          : "group-hover:scale-110 group-hover:text-cyan-400 dark:group-hover:text-cyan-300 group-hover:drop-shadow-[0_0_6px_rgba(34,211,238,0.6)]"
-      )}>
-        {icon}
-      </div>
+        {/* Efeito 3D: Cavidade / Sombra Interna Superior de Encaixe Rebaixado quando Apertado */}
+        {active && (
+          <div className="absolute inset-x-2 top-0 h-[4px] bg-gradient-to-b from-black/85 via-black/40 to-transparent rounded-t-xl pointer-events-none z-10" />
+        )}
 
-      {!collapsed && (
-        <span className={cn(
-          "font-bold text-sm tracking-tight truncate flex-1 transition-colors duration-200",
-          active ? "text-white font-black drop-shadow-sm" : "group-hover:text-slate-900 dark:group-hover:text-white"
+        {/* Efeito 3D: Bisel Especular Luminoso no Topo quando Desapertado (Tecla em Relevo) */}
+        {!active && (
+          <div className="absolute inset-x-2 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/25 to-transparent pointer-events-none z-10" />
+        )}
+
+        {/* Efeito 3D: Reflexo de Chanfro Inferior */}
+        <div className="absolute inset-x-4 bottom-0 h-[1px] bg-gradient-to-r from-transparent via-cyan-400/25 to-transparent pointer-events-none z-10" />
+
+        {/* Indicador Neon ativo no modo recolhido e expandido com Entalhe 3D */}
+        {active && (
+          <span className="absolute -left-1 top-1/2 -translate-y-1/2 w-1.5 h-6 bg-gradient-to-b from-cyan-300 via-cyan-400 to-cyan-500 rounded-r-full shadow-[0_0_12px_#22d3ee,inset_0_1px_1px_#ffffff] z-20 border-r border-y border-cyan-200/50" />
+        )}
+
+        <div className={cn(
+          "shrink-0 flex items-center justify-center transition-all duration-300 relative z-10", 
+          active 
+            ? "scale-105 text-cyan-300 drop-shadow-[0_0_10px_rgba(34,211,238,0.95)] translate-y-[0.5px]" 
+            : "group-hover:scale-110 group-hover:text-cyan-400 dark:group-hover:text-cyan-300 group-hover:drop-shadow-[0_0_6px_rgba(34,211,238,0.6)]"
         )}>
-          {label}
-        </span>
-      )}
-
-      {/* Indicador lateral no modo expandido (Beacon + Chevron Neon) */}
-      {!collapsed && (
-        active ? (
-          <motion.div 
-            layoutId="active-indicator"
-            className="ml-auto flex items-center gap-1.5 shrink-0"
-          >
-            <span className="w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_8px_#22d3ee] animate-pulse" />
-            <ChevronRight size={14} className="text-cyan-400 drop-shadow-[0_0_6px_rgba(6,182,212,0.8)]" />
-          </motion.div>
-        ) : (
-          <ChevronRight size={14} className="ml-auto text-slate-400 dark:text-slate-600 opacity-0 group-hover:opacity-100 group-hover:text-cyan-400 group-hover:translate-x-0.5 transition-all duration-200 shrink-0" />
-        )
-      )}
-
-      {/* Tooltip 3D Holográfico quando RECOLHIDO */}
-      {collapsed && (
-        <div className="absolute left-full ml-3.5 top-1/2 -translate-y-1/2 z-50 pointer-events-none opacity-0 group-hover:opacity-100 -translate-x-2 group-hover:translate-x-0 transition-all duration-200 ease-out whitespace-nowrap">
-          <div className="relative py-2 px-3 rounded-xl bg-[#080d1a]/95 backdrop-blur-xl border border-cyan-400/50 shadow-[0_10px_25px_-5px_rgba(0,0,0,0.8),0_0_20px_rgba(6,182,212,0.4),inset_0_1px_1px_rgba(255,255,255,0.2)] text-white flex items-center gap-2.5">
-            <span className={cn("w-1.5 h-1.5 rounded-full shadow-[0_0_6px]", active ? "bg-cyan-400 shadow-cyan-400" : "bg-slate-400")} />
-            <span className="text-xs font-display font-black tracking-wide uppercase text-slate-100 drop-shadow-sm">
-              {label}
-            </span>
-            {active && (
-              <span className="px-1.5 py-0.2 rounded text-[8px] font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-400/40 shadow-[0_0_6px_rgba(6,182,212,0.3)]">
-                ATIVO
-              </span>
-            )}
-          </div>
-          {/* Micro Seta do Tooltip */}
-          <div className="absolute top-1/2 -left-1 -translate-y-1/2 w-2 h-2 bg-[#080d1a] border-l border-b border-cyan-400/50 transform rotate-45" />
+          {icon}
         </div>
+
+        {!collapsed && (
+          <span className={cn(
+            "font-bold text-sm tracking-tight truncate flex-1 transition-all duration-200 relative z-10",
+            active 
+              ? "text-white font-black drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)] translate-y-[0.5px]" 
+              : "group-hover:text-slate-900 dark:group-hover:text-white"
+          )}>
+            {label}
+          </span>
+        )}
+
+        {/* Indicador lateral no modo expandido (Beacon + Chevron Neon) */}
+        {!collapsed && (
+          active ? (
+            <motion.div 
+              layoutId="active-indicator"
+              className="ml-auto flex items-center gap-1.5 shrink-0 relative z-10"
+            >
+              <span className="w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_8px_#22d3ee,0_0_16px_rgba(34,211,238,0.8)] animate-pulse" />
+              <ChevronRight size={14} className="text-cyan-400 drop-shadow-[0_0_6px_rgba(6,182,212,0.8)]" />
+            </motion.div>
+          ) : (
+            <ChevronRight size={14} className="ml-auto text-slate-400 dark:text-slate-600 opacity-0 group-hover:opacity-100 group-hover:text-cyan-400 group-hover:translate-x-0.5 transition-all duration-200 shrink-0 relative z-10" />
+          )
+        )}
+      </motion.button>
+
+      {/* Tooltip 3D Holográfico via Portal quando RECOLHIDO */}
+      {collapsed && (
+        <PortalTooltip isOpen={isHovered} coords={coords}>
+          <span className={cn("w-1.5 h-1.5 rounded-full shadow-[0_0_6px]", active ? "bg-cyan-400 shadow-cyan-400 animate-pulse" : "bg-slate-400")} />
+          <span className="text-xs font-display font-black tracking-wide uppercase text-slate-100 drop-shadow-sm">
+            {label}
+          </span>
+          {active && (
+            <span className="px-1.5 py-0.2 rounded text-[8px] font-mono font-bold bg-cyan-500/25 text-cyan-300 border border-cyan-400/40 shadow-[0_0_6px_rgba(6,182,212,0.3)]">
+              ATIVO
+            </span>
+          )}
+        </PortalTooltip>
       )}
-    </button>
+    </>
   );
 }
 
