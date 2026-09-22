@@ -49,13 +49,15 @@ import {
   ArrowDown,
   FileSignature,
   AlertCircle,
-  HelpCircle
+  HelpCircle,
+  Maximize2,
+  Minimize2
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { format, isAfter, isBefore, addDays, parseISO, subHours, differenceInDays, parse, startOfDay, isValid } from "date-fns";
 import Papa from "papaparse";
 import { cn } from "@/src/lib/utils";
-import type { Vehicle, FleetStats, LicenseJustification } from "./types";
+import { type Vehicle, type FleetStats, type LicenseJustification, normalizeDocKey } from "./types";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 import * as XLSX from "xlsx";
@@ -1209,6 +1211,7 @@ export default function App() {
   const [serverStarting, setServerStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"home" | "dashboard" | "licencas_detalhadas" | "licencas_documentos" | "financeiro_docs" | "financeiro_licencas" | "map" | "settings" | "tutorial">("dashboard");
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [activeDashboardSubTab, setActiveDashboardSubTab] = useState<"licencas" | "documentacao">("licencas");
   const [dashLicActiveTab, setDashLicActiveTab] = useState<"indicadores" | "justificativas" | "farol">("indicadores");
   const [dashDocActiveTab, setDashDocActiveTab] = useState<"indicadores" | "justificativas" | "farol">("indicadores");
@@ -1231,6 +1234,91 @@ export default function App() {
     }
   });
   const [docJustificationsLoaded, setDocJustificationsLoaded] = useState(false);
+
+  // Fullscreen state and handler for header button
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const isCurrentlyFullscreen = !!(
+        document.fullscreenElement ||
+        (document as any).webkitFullscreenElement ||
+        (document as any).mozFullScreenElement ||
+        (document as any).msFullscreenElement
+      );
+      setIsFullscreen(isCurrentlyFullscreen);
+    };
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+    document.addEventListener("mozfullscreenchange", handleFullscreenChange);
+    document.addEventListener("MSFullscreenChange", handleFullscreenChange);
+
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
+      document.removeEventListener("mozfullscreenchange", handleFullscreenChange);
+      document.removeEventListener("MSFullscreenChange", handleFullscreenChange);
+    };
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    try {
+      const doc = document as any;
+      const docEl = document.documentElement as any;
+
+      if (!doc.fullscreenElement && !doc.webkitFullscreenElement && !doc.mozFullScreenElement && !doc.msFullscreenElement) {
+        if (docEl.requestFullscreen) {
+          docEl.requestFullscreen().catch(() => {});
+        } else if (docEl.webkitRequestFullscreen) {
+          docEl.webkitRequestFullscreen();
+        } else if (docEl.mozRequestFullScreen) {
+          docEl.mozRequestFullScreen();
+        } else if (docEl.msRequestFullscreen) {
+          docEl.msRequestFullscreen();
+        }
+      } else {
+        if (doc.exitFullscreen) {
+          doc.exitFullscreen().catch(() => {});
+        } else if (doc.webkitExitFullscreen) {
+          doc.webkitExitFullscreen();
+        } else if (doc.mozCancelFullScreen) {
+          doc.mozCancelFullScreen();
+        } else if (doc.msExitFullscreen) {
+          doc.msExitFullscreen();
+        }
+      }
+    } catch (err) {
+      console.warn("Fullscreen toggle warning:", err);
+    }
+  }, []);
+
+  // Sidebar navigation scroll tracking and helper controls
+  const sidebarNavRef = useRef<HTMLElement>(null);
+  const [sidebarCanScrollUp, setSidebarCanScrollUp] = useState(false);
+  const [sidebarCanScrollDown, setSidebarCanScrollDown] = useState(false);
+
+  const checkSidebarScroll = useCallback(() => {
+    if (sidebarNavRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = sidebarNavRef.current;
+      setSidebarCanScrollUp(scrollTop > 6);
+      setSidebarCanScrollDown(scrollTop + clientHeight < scrollHeight - 6);
+    }
+  }, []);
+
+  useEffect(() => {
+    const el = sidebarNavRef.current;
+    if (!el) return;
+    checkSidebarScroll();
+    el.addEventListener("scroll", checkSidebarScroll, { passive: true });
+    window.addEventListener("resize", checkSidebarScroll);
+    const timer = setTimeout(checkSidebarScroll, 200);
+    return () => {
+      el.removeEventListener("scroll", checkSidebarScroll);
+      window.removeEventListener("resize", checkSidebarScroll);
+      clearTimeout(timer);
+    };
+  }, [checkSidebarScroll, isSidebarOpen]);
   const [showMapFilters, setShowMapFilters] = useState(true);
   const [activeSettingsTab, setActiveSettingsTab] = useState("geral");
   const [searchTerm, setSearchTerm] = useState("");
@@ -1297,7 +1385,6 @@ export default function App() {
   const [originCity, setOriginCity] = useState<string>("");
   const [destinationCity, setDestinationCity] = useState<string>("");
   const [routeDistance, setRouteDistance] = useState<number | null>(null);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [showNotifications, setShowNotifications] = useState(false);
   const [isGoogleConnected, setIsGoogleConnected] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -1453,13 +1540,17 @@ export default function App() {
   }, []);
 
   const handleSaveJustification = async (just: LicenseJustification) => {
-    // Isolate by plate + documentType + status: only replace the exact same item
+    // Isolate strictly by plate + normalized documentType + status: only replace the exact same license item
+    const targetNormDoc = normalizeDocKey(just.documentType);
+    const targetPlate = (just.plate || "").toUpperCase().trim();
+    const targetStatus = (just.status || "").toUpperCase().trim();
+
     const nextJustifications = [
       ...justifications.filter(j => {
         if (j.id === just.id) return false;
-        const samePlate = (j.plate || "").toUpperCase().trim() === (just.plate || "").toUpperCase().trim();
-        const sameDoc = (j.documentType || "").toUpperCase().trim() === (just.documentType || "").toUpperCase().trim();
-        const sameStatus = (j.status || "").toUpperCase().trim() === (just.status || "").toUpperCase().trim();
+        const samePlate = (j.plate || "").toUpperCase().trim() === targetPlate;
+        const sameDoc = normalizeDocKey(j.documentType) === targetNormDoc;
+        const sameStatus = (j.status || "").toUpperCase().trim() === targetStatus;
         if (samePlate && sameDoc && sameStatus) return false;
         return true;
       }),
@@ -6288,7 +6379,7 @@ export default function App() {
         )}
       >
         <div className={cn(
-          "flex items-center border-b border-slate-200/40 dark:border-slate-800/80 transition-all duration-300",
+          "flex items-center border-b border-slate-200/40 dark:border-slate-800/80 transition-all duration-300 shrink-0",
           isSidebarOpen ? "p-6 gap-3" : "py-5 px-0 justify-center"
         )}>
           {settings.showLogo ? (
@@ -6310,140 +6401,189 @@ export default function App() {
           )}
         </div>
 
-        <nav className={cn(
-          "flex-1 overflow-y-auto sidebar-scroll transition-all duration-300",
-          isSidebarOpen ? "p-4 space-y-2 overflow-x-hidden" : "py-4 px-2 space-y-2.5 flex flex-col items-center overflow-visible"
-        )}>
-          {/* Botões de Tema: LIGHT e DARK (inseridos diretamente acima de Dashboard Licenças) */}
-          <div className={cn("mb-3 transition-all duration-300", !isSidebarOpen && "w-full flex justify-center")}>
-            {isSidebarOpen ? (
-              <div className="bg-slate-200/80 dark:bg-slate-800/90 p-1.5 rounded-2xl border border-slate-300/70 dark:border-slate-700/80 flex items-center gap-1 shadow-inner">
-                <motion.button 
-                  type="button"
-                  whileTap={{ scale: 0.95, y: 1 }}
-                  onClick={() => setTheme("light")}
-                  className={cn(
-                    "flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-black transition-all duration-300 cursor-pointer",
-                    theme === "light" 
-                      ? "bg-white text-blue-600 shadow-[inset_0_2px_4px_rgba(0,0,0,0.1),0_2px_4px_rgba(0,0,0,0.05)] border border-slate-200/80 scale-[1.02] translate-y-[1px]" 
-                      : "text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
-                  )}
-                >
-                  <Sun size={16} className={cn("transition-transform duration-300", theme === "light" && "text-amber-500 fill-amber-400 scale-110")} />
-                  <span>LIGHT</span>
-                </motion.button>
-                <motion.button 
-                  type="button"
-                  whileTap={{ scale: 0.95, y: 1 }}
-                  onClick={() => setTheme("dark")}
-                  className={cn(
-                    "flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-black transition-all duration-300 cursor-pointer",
-                    theme === "dark" 
-                      ? "bg-slate-900 text-cyan-400 shadow-[inset_0_2px_6px_rgba(0,0,0,0.8),0_0_12px_rgba(6,182,212,0.3)] border border-slate-700 scale-[1.02] translate-y-[1px]" 
-                      : "text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
-                  )}
-                >
-                  <Moon size={16} className={cn("transition-transform duration-300", theme === "dark" && "text-cyan-400 fill-cyan-400/30 scale-110")} />
-                  <span>DARK</span>
-                </motion.button>
-              </div>
-            ) : (
-              <CollapsedThemeToggle theme={theme} setTheme={setTheme} />
+        <div className="flex-1 relative min-h-0 flex flex-col overflow-hidden">
+          {/* Indicador / Botão suave de rolar para cima (quando há conteúdo acima) */}
+          <AnimatePresence>
+            {sidebarCanScrollUp && (
+              <motion.button
+                type="button"
+                initial={{ opacity: 0, y: -6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                onClick={() => sidebarNavRef.current?.scrollBy({ top: -140, behavior: 'smooth' })}
+                title="Rolar menu para cima"
+                aria-label="Rolar menu para cima"
+                className={cn(
+                  "absolute top-1 left-1/2 -translate-x-1/2 z-30 rounded-full bg-slate-900/95 text-cyan-400 border border-cyan-500/50 shadow-lg backdrop-blur-md cursor-pointer hover:bg-cyan-500/20 hover:scale-110 active:scale-95 transition-all",
+                  isSidebarOpen ? "w-28 flex items-center justify-center gap-1.5 py-1 px-2 text-[10px] font-bold" : "w-7 h-7 flex items-center justify-center p-1"
+                )}
+              >
+                <ChevronUp size={14} className="animate-pulse" />
+                {isSidebarOpen && <span>Subir</span>}
+              </motion.button>
             )}
-          </div>
+          </AnimatePresence>
 
-          <NavItem 
-            icon={<Home size={22} />} 
-            label="Página Inicial" 
-            active={false} 
-            onClick={() => {
-              setShowCover(true);
-              setActiveTab("dashboard");
-              setActiveDashboardSubTab("licencas");
-            }}
-            collapsed={!isSidebarOpen}
-          />
-          <NavItem 
-            icon={<LayoutDashboard size={22} />} 
-            label="Dashboard Licenças" 
-            active={activeTab === "dashboard" && activeDashboardSubTab === "licencas"} 
-            onClick={() => {
-              setActiveTab("dashboard");
-              setActiveDashboardSubTab("licencas");
-            }}
-            collapsed={!isSidebarOpen}
-          />
-          <NavItem 
-            icon={<BarChart3 size={22} />} 
-            label="Dashboard Documentação" 
-            active={activeTab === "dashboard" && activeDashboardSubTab === "documentacao"} 
-            onClick={() => {
-              setActiveTab("dashboard");
-              setActiveDashboardSubTab("documentacao");
-            }}
-            collapsed={!isSidebarOpen}
-          />
-          <NavItem 
-            icon={<Truck size={22} />} 
-            label="Licenças Detalhadas" 
-            active={activeTab === "licencas_detalhadas"} 
-            onClick={() => setActiveTab("licencas_detalhadas")}
-            collapsed={!isSidebarOpen}
-          />
-          <NavItem 
-            icon={<DollarSign size={22} />} 
-            label="Financeiro - Licenças" 
-            active={activeTab === "financeiro_licencas"} 
-            onClick={() => setActiveTab("financeiro_licencas")}
-            collapsed={!isSidebarOpen}
-          />
-          <NavItem 
-            icon={<FileText size={22} />} 
-            label="Documentação Detalhada" 
-            active={activeTab === "licencas_documentos"} 
-            onClick={() => setActiveTab("licencas_documentos")}
-            collapsed={!isSidebarOpen}
-          />
-          <NavItem 
-            icon={<Receipt size={22} />} 
-            label="Financeiro - Docs" 
-            active={activeTab === "financeiro_docs"} 
-            onClick={() => setActiveTab("financeiro_docs")}
-            collapsed={!isSidebarOpen}
-          />
-          <NavItem 
-            icon={<MapIcon size={22} />} 
-            label="Mapas" 
-            active={activeTab === "map"} 
-            onClick={() => setActiveTab("map")}
-            collapsed={!isSidebarOpen}
-          />
-          <NavItem 
-            icon={<Settings size={22} />} 
-            label="Configurações" 
-            active={activeTab === "settings"} 
-            onClick={() => setActiveTab("settings")}
-            collapsed={!isSidebarOpen}
-          />
-          <NavItem 
-            icon={<HelpCircle size={22} />} 
-            label="Como Usar?" 
-            active={activeTab === "tutorial"} 
-            onClick={() => setActiveTab("tutorial")}
-            collapsed={!isSidebarOpen}
-          />
-        </nav>
+          <nav 
+            ref={sidebarNavRef}
+            className={cn(
+              "flex-1 overflow-y-auto overflow-x-hidden sidebar-scroll [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden transition-all duration-300 overscroll-contain",
+              isSidebarOpen ? "p-4 space-y-2" : "py-4 px-2 space-y-2.5 flex flex-col items-center w-full min-h-0"
+            )}
+          >
+            {/* Botões de Tema: LIGHT e DARK (inseridos diretamente acima de Dashboard Licenças) */}
+            <div className={cn("mb-3 transition-all duration-300 shrink-0", !isSidebarOpen && "w-full flex justify-center")}>
+              {isSidebarOpen ? (
+                <div className="bg-slate-200/80 dark:bg-slate-800/90 p-1.5 rounded-2xl border border-slate-300/70 dark:border-slate-700/80 flex items-center gap-1 shadow-inner">
+                  <motion.button 
+                    type="button"
+                    whileTap={{ scale: 0.95, y: 1 }}
+                    onClick={() => setTheme("light")}
+                    className={cn(
+                      "flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-black transition-all duration-300 cursor-pointer",
+                      theme === "light" 
+                        ? "bg-white text-blue-600 shadow-[inset_0_2px_4px_rgba(0,0,0,0.1),0_2px_4px_rgba(0,0,0,0.05)] border border-slate-200/80 scale-[1.02] translate-y-[1px]" 
+                        : "text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+                    )}
+                  >
+                    <Sun size={16} className={cn("transition-transform duration-300", theme === "light" && "text-amber-500 fill-amber-400 scale-110")} />
+                    <span>LIGHT</span>
+                  </motion.button>
+                  <motion.button 
+                    type="button"
+                    whileTap={{ scale: 0.95, y: 1 }}
+                    onClick={() => setTheme("dark")}
+                    className={cn(
+                      "flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-black transition-all duration-300 cursor-pointer",
+                      theme === "dark" 
+                        ? "bg-slate-900 text-cyan-400 shadow-[inset_0_2px_6px_rgba(0,0,0,0.8),0_0_12px_rgba(6,182,212,0.3)] border border-slate-700 scale-[1.02] translate-y-[1px]" 
+                        : "text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+                    )}
+                  >
+                    <Moon size={16} className={cn("transition-transform duration-300", theme === "dark" && "text-cyan-400 fill-cyan-400/30 scale-110")} />
+                    <span>DARK</span>
+                  </motion.button>
+                </div>
+              ) : (
+                <CollapsedThemeToggle theme={theme} setTheme={setTheme} />
+              )}
+            </div>
+
+            <NavItem 
+              icon={<Home size={22} />} 
+              label="Página Inicial" 
+              active={false} 
+              onClick={() => {
+                setShowCover(true);
+                setActiveTab("dashboard");
+                setActiveDashboardSubTab("licencas");
+              }}
+              collapsed={!isSidebarOpen}
+            />
+            <NavItem 
+              icon={<LayoutDashboard size={22} />} 
+              label="Dashboard Licenças" 
+              active={activeTab === "dashboard" && activeDashboardSubTab === "licencas"} 
+              onClick={() => {
+                setActiveTab("dashboard");
+                setActiveDashboardSubTab("licencas");
+              }}
+              collapsed={!isSidebarOpen}
+            />
+            <NavItem 
+              icon={<BarChart3 size={22} />} 
+              label="Dashboard Documentação" 
+              active={activeTab === "dashboard" && activeDashboardSubTab === "documentacao"} 
+              onClick={() => {
+                setActiveTab("dashboard");
+                setActiveDashboardSubTab("documentacao");
+              }}
+              collapsed={!isSidebarOpen}
+            />
+            <NavItem 
+              icon={<Truck size={22} />} 
+              label="Licenças Detalhadas" 
+              active={activeTab === "licencas_detalhadas"} 
+              onClick={() => setActiveTab("licencas_detalhadas")}
+              collapsed={!isSidebarOpen}
+            />
+            <NavItem 
+              icon={<DollarSign size={22} />} 
+              label="Financeiro - Licenças" 
+              active={activeTab === "financeiro_licencas"} 
+              onClick={() => setActiveTab("financeiro_licencas")}
+              collapsed={!isSidebarOpen}
+            />
+            <NavItem 
+              icon={<FileText size={22} />} 
+              label="Documentação Detalhada" 
+              active={activeTab === "licencas_documentos"} 
+              onClick={() => setActiveTab("licencas_documentos")}
+              collapsed={!isSidebarOpen}
+            />
+            <NavItem 
+              icon={<Receipt size={22} />} 
+              label="Financeiro - Docs" 
+              active={activeTab === "financeiro_docs"} 
+              onClick={() => setActiveTab("financeiro_docs")}
+              collapsed={!isSidebarOpen}
+            />
+            <NavItem 
+              icon={<MapIcon size={22} />} 
+              label="Mapas" 
+              active={activeTab === "map"} 
+              onClick={() => setActiveTab("map")}
+              collapsed={!isSidebarOpen}
+            />
+            <NavItem 
+              icon={<Settings size={22} />} 
+              label="Configurações" 
+              active={activeTab === "settings"} 
+              onClick={() => setActiveTab("settings")}
+              collapsed={!isSidebarOpen}
+            />
+            <NavItem 
+              icon={<HelpCircle size={22} />} 
+              label="Como Usar?" 
+              active={activeTab === "tutorial"} 
+              onClick={() => setActiveTab("tutorial")}
+              collapsed={!isSidebarOpen}
+            />
+          </nav>
+
+          {/* Indicador / Botão suave de rolar para baixo (quando há mais itens abaixo) */}
+          <AnimatePresence>
+            {sidebarCanScrollDown && (
+              <motion.button
+                type="button"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 6 }}
+                onClick={() => sidebarNavRef.current?.scrollBy({ top: 140, behavior: 'smooth' })}
+                title="Rolar menu para baixo"
+                aria-label="Rolar menu para baixo"
+                className={cn(
+                  "absolute bottom-1 left-1/2 -translate-x-1/2 z-30 rounded-full bg-slate-900/95 text-cyan-400 border border-cyan-500/50 shadow-lg backdrop-blur-md cursor-pointer hover:bg-cyan-500/20 hover:scale-110 active:scale-95 transition-all",
+                  isSidebarOpen ? "w-28 flex items-center justify-center gap-1.5 py-1 px-2 text-[10px] font-bold" : "w-7 h-7 flex items-center justify-center p-1"
+                )}
+              >
+                <ChevronDown size={14} className="animate-pulse" />
+                {isSidebarOpen && <span>Descer</span>}
+              </motion.button>
+            )}
+          </AnimatePresence>
+        </div>
 
         {/* Indicador de Conexão Firebase */}
         <div className={cn(
-          "border-t border-slate-200/40 dark:border-slate-800/80 transition-all duration-300",
+          "border-t border-slate-200/40 dark:border-slate-800/80 transition-all duration-300 shrink-0",
           isSidebarOpen ? "p-3" : "py-3 px-2 flex justify-center"
         )}>
           <FirebaseStatusIndicator isSidebarOpen={isSidebarOpen} />
         </div>
 
         <div className={cn(
-          "border-t border-slate-200/40 dark:border-slate-800/80 transition-all duration-300",
+          "border-t border-slate-200/40 dark:border-slate-800/80 transition-all duration-300 shrink-0",
           isSidebarOpen ? "p-3" : "py-3 px-2 flex justify-center"
         )}>
           <SidebarToggleButton3D 
@@ -6510,6 +6650,40 @@ export default function App() {
                 <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-slate-900/95 dark:bg-slate-800/95 rotate-45 border-l border-t border-slate-700/60"></div>
               </div>
             </div>
+
+            {/* Botão de Maximizar Tela / Modo Tela Cheia no Navegador */}
+            <div className="relative group/fullscreen flex items-center justify-center">
+              <button 
+                type="button"
+                onClick={toggleFullscreen}
+                title={isFullscreen ? "Restaurar Tela (Sair de Tela Cheia)" : "Maximizar Tela (Tela Cheia)"}
+                aria-label={isFullscreen ? "Restaurar Tela (Sair de Tela Cheia)" : "Maximizar Tela (Tela Cheia)"}
+                className={cn(
+                  "p-2.5 text-slate-500 dark:text-slate-400 hover:bg-white dark:hover:bg-slate-800 hover:text-blue-600 dark:hover:text-cyan-400 hover:shadow-md rounded-xl transition-all cursor-pointer border border-transparent hover:border-slate-200/60 dark:hover:border-slate-700/60",
+                  isFullscreen && "bg-blue-50 dark:bg-cyan-950/40 text-blue-600 dark:text-cyan-400 border-blue-200 dark:border-cyan-800 shadow-sm"
+                )}
+              >
+                {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
+              </button>
+
+              {/* Tooltip flutuante informativo ao passar o mouse */}
+              <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 px-3 py-2 bg-slate-900/95 dark:bg-slate-800/95 backdrop-blur-sm text-white text-xs font-semibold rounded-xl shadow-2xl whitespace-nowrap opacity-0 translate-y-1 pointer-events-none group-hover/fullscreen:opacity-100 group-hover/fullscreen:translate-y-0 transition-all duration-200 z-50 flex flex-col items-center gap-1 border border-slate-700/60">
+                <div className="flex items-center gap-1.5">
+                  {isFullscreen ? (
+                    <Minimize2 size={13} className="text-cyan-400 shrink-0" />
+                  ) : (
+                    <Maximize2 size={13} className="text-blue-400 shrink-0" />
+                  )}
+                  <span>{isFullscreen ? "Restaurar Tela Normal" : "Maximizar Tela (Tela Cheia)"}</span>
+                </div>
+                <div className="text-[10px] font-normal text-slate-300 border-t border-slate-700/60 pt-1 mt-0.5 w-full text-center">
+                  {isFullscreen ? "Pressione ESC ou clique para sair" : "Expande para tela inteira no navegador"}
+                </div>
+                {/* Seta do tooltip */}
+                <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-slate-900/95 dark:bg-slate-800/95 rotate-45 border-l border-t border-slate-700/60"></div>
+              </div>
+            </div>
+
             <div className="relative">
               <button 
                 onClick={() => setShowNotifications(!showNotifications)}
@@ -11205,9 +11379,25 @@ function CollapsedThemeToggle({
     setHoveredButton(type);
   };
 
+  useEffect(() => {
+    if (!hoveredButton) return;
+    const updateCoords = () => {
+      const el = hoveredButton === "light" ? lightRef.current : darkRef.current;
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        setCoords({
+          top: rect.top + rect.height / 2,
+          left: rect.right + 12
+        });
+      }
+    };
+    window.addEventListener("scroll", updateCoords, true);
+    return () => window.removeEventListener("scroll", updateCoords, true);
+  }, [hoveredButton]);
+
   return (
     <>
-      <div className="flex flex-col items-center gap-1 p-1 bg-slate-200/80 dark:bg-slate-800/90 rounded-2xl border border-slate-300/70 dark:border-slate-700/80 shadow-inner w-11 mx-auto relative select-none">
+      <div className="flex flex-col items-center gap-1 p-1 bg-slate-200/80 dark:bg-slate-800/90 rounded-2xl border border-slate-300/70 dark:border-slate-700/80 shadow-inner w-11 mx-auto relative select-none shrink-0 min-h-[82px]">
         <motion.button 
           ref={lightRef}
           type="button"
@@ -11216,7 +11406,7 @@ function CollapsedThemeToggle({
           onMouseEnter={() => handleMouseEnter("light")}
           onMouseLeave={() => setHoveredButton(null)}
           className={cn(
-            "w-9 h-9 rounded-xl transition-all duration-200 flex items-center justify-center cursor-pointer",
+            "w-9 h-9 min-h-[36px] rounded-xl transition-all duration-200 flex items-center justify-center cursor-pointer shrink-0",
             theme === "light" 
               ? "bg-white text-amber-500 shadow-md scale-105" 
               : "text-slate-400 hover:text-amber-500 hover:bg-white/50 dark:hover:bg-slate-700/50"
@@ -11232,7 +11422,7 @@ function CollapsedThemeToggle({
           onMouseEnter={() => handleMouseEnter("dark")}
           onMouseLeave={() => setHoveredButton(null)}
           className={cn(
-            "w-9 h-9 rounded-xl transition-all duration-200 flex items-center justify-center cursor-pointer",
+            "w-9 h-9 min-h-[36px] rounded-xl transition-all duration-200 flex items-center justify-center cursor-pointer shrink-0",
             theme === "dark" 
               ? "bg-slate-950 text-cyan-400 shadow-md shadow-cyan-950/50 border border-cyan-500/40 scale-105" 
               : "text-slate-400 hover:text-cyan-400 hover:bg-white/50 dark:hover:bg-slate-700/50"
@@ -11301,6 +11491,21 @@ function NavItem({
     setIsHovered(false);
   };
 
+  useEffect(() => {
+    if (!isHovered || !collapsed) return;
+    const updateCoords = () => {
+      if (buttonRef.current) {
+        const rect = buttonRef.current.getBoundingClientRect();
+        setCoords({
+          top: rect.top + rect.height / 2,
+          left: rect.right + 12
+        });
+      }
+    };
+    window.addEventListener("scroll", updateCoords, true);
+    return () => window.removeEventListener("scroll", updateCoords, true);
+  }, [isHovered, collapsed]);
+
   return (
     <>
       <motion.button 
@@ -11317,10 +11522,10 @@ function NavItem({
         }}
         transition={{ type: "spring", stiffness: 450, damping: 26, mass: 0.7 }}
         className={cn(
-          "transition-colors duration-200 relative group cursor-pointer select-none outline-none overflow-hidden",
+          "transition-colors duration-200 relative group cursor-pointer select-none outline-none overflow-hidden shrink-0",
           collapsed
-            ? "w-11 h-11 rounded-2xl flex items-center justify-center mx-auto"
-            : "w-full flex items-center gap-3.5 p-3 rounded-2xl text-left",
+            ? "w-11 h-11 min-h-[44px] min-w-[44px] rounded-2xl flex items-center justify-center mx-auto"
+            : "w-full min-h-[48px] flex items-center gap-3.5 p-3 rounded-2xl text-left",
           active 
             ? collapsed
               ? "bg-gradient-to-b from-slate-950 via-slate-900 to-cyan-950/80 text-white border-2 border-cyan-400 shadow-[inset_0_4px_10px_rgba(0,0,0,0.92),inset_0_-1px_2px_rgba(255,255,255,0.18),0_0_22px_rgba(6,182,212,0.6)]"

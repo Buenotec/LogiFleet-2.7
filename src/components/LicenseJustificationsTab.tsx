@@ -6,7 +6,7 @@ import {
   FileSpreadsheet, ExternalLink, Table, Copy, Layers, Database, LayoutGrid, PenLine,
   Warehouse, CalendarX, RotateCcw, FileText, ChevronLeft, ChevronRight
 } from 'lucide-react';
-import { Vehicle, LicenseJustification } from '../types';
+import { Vehicle, LicenseJustification, normalizeDocKey } from '../types';
 import { cn } from "@/src/lib/utils";
 import { Card3D } from './Card3D';
 import { MultiSelectFilter, MultiSelectOption } from './MultiSelectFilter';
@@ -300,30 +300,30 @@ export const LicenseJustificationsTab: React.FC<Props> = ({
     return op;
   };
 
-  // Map of justification by plate + docType + status
+  // Map of justification by plate + docType + status (STRICT 1:1 MATCHING ONLY)
   const justMap = useMemo(() => {
     const map = new Map<string, LicenseJustification>();
     justifications.forEach(j => {
-      if (j.plate) {
+      if (j.plate && j.documentType) {
+        const rawDoc = (j.documentType || "").toUpperCase().trim();
+        const normDoc = normalizeDocKey(j.documentType);
+        // STRICT 1:1 ISOLATION: Forbid generic catch-all documentType placeholders from bleeding
+        if (!normDoc || normDoc === "TODAS" || normDoc === "TODASASLICENCAS" || normDoc === "GERAL") {
+          return;
+        }
+
         const p = (j.plate || "").toUpperCase().trim();
-        const d = (j.documentType || "").toUpperCase().trim();
         const s = (j.status || "").toUpperCase().trim();
 
-        // Exact match: PLATE#DOC#STATUS
-        if (d && s) {
-          map.set(`${p}#${d}#${s}`, j);
-        }
-        // Match for all docs of that plate with this specific status
+        // STRICT 1:1 MATCHING ONLY:
+        // Set exact match with raw document name and normalized document name
         if (s) {
-          map.set(`${p}#ALL#${s}`, j);
-          map.set(`${p}#TODAS AS LICENÇAS#${s}`, j);
-          map.set(`${p}#TODAS#${s}`, j);
-          map.set(`${p}#GERAL#${s}`, j);
+          map.set(`${p}#${rawDoc}#${s}`, j);
+          map.set(`${p}#${normDoc}#${s}`, j);
         }
-        // Match if justification explicitly has no status constraint
-        if (d && !s) {
-          map.set(`${p}#${d}#ANY`, j);
-        }
+        // Match if alert doesn't have status constraint
+        map.set(`${p}#${rawDoc}#ANY`, j);
+        map.set(`${p}#${normDoc}#ANY`, j);
       }
     });
     return map;
@@ -365,19 +365,18 @@ export const LicenseJustificationsTab: React.FC<Props> = ({
 
       if (pendingDocs.length > 0) {
         pendingDocs.forEach(d => {
-          const docType = (d.type || '').toUpperCase().trim();
+          const rawDoc = (d.type || '').toUpperCase().trim();
+          const normDoc = normalizeDocKey(d.type);
           const itemStatus = (d.status || '').toUpperCase().trim();
 
-          // CRITICAL ISOLATION: A justification with status VENCIDO will NEVER match an item with status ATENÇÃO!
+          // CRITICAL 1:1 ISOLATION: A justification for Tacógrafo will NEVER match any other license!
           const specificJust = 
-            justMap.get(`${p}#${docType}#${itemStatus}`) ||
-            justMap.get(`${p}#ALL#${itemStatus}`) ||
-            justMap.get(`${p}#TODAS AS LICENÇAS#${itemStatus}`) ||
-            justMap.get(`${p}#TODAS#${itemStatus}`) ||
-            justMap.get(`${p}#GERAL#${itemStatus}`) ||
-            justMap.get(`${p}#${docType}#ANY`);
+            justMap.get(`${p}#${rawDoc}#${itemStatus}`) ||
+            justMap.get(`${p}#${normDoc}#${itemStatus}`) ||
+            justMap.get(`${p}#${rawDoc}#ANY`) ||
+            justMap.get(`${p}#${normDoc}#ANY`);
 
-          includedKeySet.add(`${p}#${docType}`);
+          includedKeySet.add(`${p}#${normDoc}`);
 
           items.push({
             plate: v.plate || "-",
@@ -395,7 +394,8 @@ export const LicenseJustificationsTab: React.FC<Props> = ({
         const plateJusts = justByPlate.get(p) || [];
         plateJusts.forEach(genJust => {
           const docType = (genJust.documentType || "Geral").toUpperCase().trim();
-          includedKeySet.add(`${p}#${docType}`);
+          const normDoc = normalizeDocKey(docType);
+          includedKeySet.add(`${p}#${normDoc}`);
           items.push({
             plate: v.plate || "-",
             fleet: v.fleet || "-",
@@ -415,7 +415,8 @@ export const LicenseJustificationsTab: React.FC<Props> = ({
       const j = justifications[i];
       const p = (j.plate || "").toUpperCase().trim();
       const docType = (j.documentType || "Geral").toUpperCase().trim();
-      const key = `${p}#${docType}`;
+      const normDoc = normalizeDocKey(docType);
+      const key = `${p}#${normDoc}`;
       if (!includedKeySet.has(key)) {
         includedKeySet.add(key);
         items.push({
@@ -679,7 +680,7 @@ export const LicenseJustificationsTab: React.FC<Props> = ({
   }, [alertVehicles]);
 
   const getRowKey = (plate: string, docType: string, status?: string) => 
-    `${(plate || '').toUpperCase().trim()}#${(docType || '').toUpperCase().trim()}#${(status || '').toUpperCase().trim()}`;
+    `${(plate || '').toUpperCase().trim()}#${normalizeDocKey(docType)}#${(status || '').toUpperCase().trim()}`;
 
   const getCellValues = (item: {
     plate: string;
@@ -768,8 +769,9 @@ export const LicenseJustificationsTab: React.FC<Props> = ({
       const cleanPlate = (item.plate || "").toUpperCase().trim().replace(/[^a-zA-Z0-9]/g, '');
       const cleanDoc = (item.documentType || "geral").toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
       const cleanStatus = (item.status || "vencido").toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
+      const isExactDocMatch = item.justification && normalizeDocKey(item.justification.documentType) === normalizeDocKey(item.documentType);
       const toSave: LicenseJustification = {
-        id: item.justification?.id || `just_${cleanPlate}_${cleanDoc}_${cleanStatus}_${Date.now()}`,
+        id: (isExactDocMatch && item.justification?.id) ? item.justification.id : `just_${cleanPlate}_${cleanDoc}_${cleanStatus}_${Date.now()}`,
         plate: (item.plate || "").toUpperCase().trim(),
         fleet: (item.fleet || "").trim(),
         operation: formatOperationName(item.operation),
@@ -819,9 +821,14 @@ export const LicenseJustificationsTab: React.FC<Props> = ({
     const key = item ? getRowKey(item.plate, item.documentType, item.status) : '';
     const currentInline = key && inlineEdits[key] ? inlineEdits[key] : null;
 
-    if (item?.justification) {
+    const isExactDocMatch = item?.justification && normalizeDocKey(item.justification.documentType) === normalizeDocKey(item.documentType);
+    if (isExactDocMatch && item?.justification) {
       setEditingItem({
         ...item.justification,
+        plate: item.plate !== "-" ? item.plate : item.justification.plate,
+        fleet: item.fleet !== "-" ? item.fleet : item.justification.fleet,
+        operation: item.operation !== "-" ? item.operation : item.justification.operation,
+        documentType: item.documentType || item.justification.documentType,
         status: item.status || item.justification.status || "VENCIDO",
         reason: currentInline?.reason ?? item.justification.reason,
         authorizedBy: currentInline?.authorizedBy ?? item.justification.authorizedBy,
@@ -830,14 +837,14 @@ export const LicenseJustificationsTab: React.FC<Props> = ({
       });
     } else if (item) {
       const cleanPlate = (item.plate || "").toUpperCase().trim().replace(/[^a-zA-Z0-9]/g, '');
-      const cleanDoc = (item.documentType || "geral").toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
+      const cleanDoc = normalizeDocKey(item.documentType).toLowerCase() || "doc";
       const cleanStatus = (item.status || "vencido").toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
       setEditingItem({
         id: `just_${cleanPlate}_${cleanDoc}_${cleanStatus}_${Date.now()}`,
         plate: item.plate !== "-" ? item.plate : "",
         fleet: item.fleet !== "-" ? item.fleet : "",
         operation: item.operation !== "-" ? item.operation : "",
-        documentType: item.documentType,
+        documentType: item.documentType || "",
         status: (item.status || "VENCIDO").toUpperCase().trim(),
         reason: currentInline?.reason ?? "",
         authorizedBy: currentInline?.authorizedBy ?? "",
@@ -851,7 +858,7 @@ export const LicenseJustificationsTab: React.FC<Props> = ({
         plate: "",
         fleet: "",
         operation: "",
-        documentType: "Todas as Licenças",
+        documentType: availableLicenses[0] || "",
         status: "VENCIDO",
         reason: "",
         authorizedBy: "",
@@ -867,6 +874,10 @@ export const LicenseJustificationsTab: React.FC<Props> = ({
     e.preventDefault();
     if (!editingItem?.plate) {
       alert("Por favor, informe a placa do veículo.");
+      return;
+    }
+    if (!editingItem?.documentType || editingItem.documentType.trim() === "") {
+      alert("Por favor, informe a Licença / Documento específico.");
       return;
     }
 
@@ -2147,11 +2158,17 @@ export const LicenseJustificationsTab: React.FC<Props> = ({
                       </label>
                       <input
                         type="text"
+                        list="modal-available-licenses"
                         value={editingItem.documentType || ""}
                         onChange={(e) => setEditingItem({ ...editingItem, documentType: e.target.value })}
-                        placeholder="Ex: DER, TACÓGRAFO..."
+                        placeholder="Ex: TACÓGRAFO, TX INSP TACÓGRAFO, DER..."
                         className="w-full px-3 py-2 rounded-xl text-xs font-bold bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white outline-none focus:ring-2 focus:ring-blue-500"
                       />
+                      <datalist id="modal-available-licenses">
+                        {availableLicenses.map((lic) => (
+                          <option key={lic} value={lic} />
+                        ))}
+                      </datalist>
                     </div>
                     <div>
                       <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">

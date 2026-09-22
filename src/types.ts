@@ -62,3 +62,19 @@ export interface LicenseJustification {
   updatedAt: string;
   updatedBy?: string;
 }
+
+/**
+ * Normalizes document type strings into canonical keys for strict 1:1 matching.
+ * Guarantees that EVERY single document is 100% individual and strictly isolated:
+ * Tacógrafo will NEVER match or replicate to Tx Insp Tacógrafo, Registro Cadastral,
+ * Seguro, or any other license of the same vehicle plate.
+ */
+export function normalizeDocKey(str?: string): string {
+  if (!str) return "";
+  return str
+    .toUpperCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .replace(/[^A-Z0-9]/g, "");
+}
