@@ -4,12 +4,14 @@ import {
   Clock, UserCheck, Calendar, Search, Filter, Download, X, 
   ShieldCheck, AlertOctagon, Truck, Building2, MessageSquare,
   FileSpreadsheet, Table, Copy, Layers, Database, LayoutGrid, RefreshCw, PenLine,
-  Warehouse, CalendarX, RotateCcw, FileText, XCircle, ChevronLeft, ChevronRight
+  Warehouse, CalendarX, RotateCcw, FileText, XCircle, ChevronLeft, ChevronRight, Printer, History
 } from 'lucide-react';
-import { Vehicle, LicenseJustification, normalizeDocKey } from '../types';
+import { Vehicle, LicenseJustification, JustificationHistoryItem, normalizeDocKey } from '../types';
 import { cn } from "@/src/lib/utils";
 import { Card3D } from './Card3D';
 import { MultiSelectFilter, MultiSelectOption } from './MultiSelectFilter';
+import { PendingStatusSelector } from './PendingStatusSelector';
+import { VehicleJustificationHistoryModal } from './VehicleJustificationHistoryModal';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
@@ -24,6 +26,8 @@ interface Props {
   loadPDFLogo: () => Promise<HTMLImageElement | null>;
   includePdfSummaries: boolean;
   theme?: 'light' | 'dark';
+  historyItems?: JustificationHistoryItem[];
+  onAddHistoryItem?: (item: JustificationHistoryItem) => Promise<void>;
 }
 
 const DEFAULT_DOC_AUTH_REASONS = [
@@ -76,6 +80,70 @@ const COMMON_DOC_FORECASTS = [
   "Sem previsão de pagamento imediato"
 ];
 
+export type JustificationSubCategory = 'GARAGEM' | 'SEM_PREVISAO' | 'POSTPONED' | null;
+
+export interface JustificationCategoryInfo {
+  key: JustificationSubCategory;
+  label: string;
+  shortLabel: string;
+  badgeClass: string;
+  pdfTag: string;
+  pdfColor: [number, number, number];
+}
+
+export const getJustificationCategoryInfo = (
+  reason?: string | null,
+  forecast?: string | null,
+  observations?: string | null
+): JustificationCategoryInfo => {
+  const r = (reason || "").toLowerCase();
+  const f = (forecast || "").toLowerCase();
+  const o = (observations || "").toLowerCase();
+  const full = `${r} ${f} ${o}`;
+
+  if (full.includes("parado no garagem") || full.includes("parado na garagem") || full.includes("garagem")) {
+    return {
+      key: 'GARAGEM',
+      label: 'Parado no Garagem',
+      shortLabel: 'Garagem',
+      badgeClass: 'bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-950/70 dark:text-indigo-300 dark:border-indigo-800',
+      pdfTag: '[PARADO NO GARAGEM]',
+      pdfColor: [79, 70, 229]
+    };
+  }
+
+  if (full.includes("sem previsão de renovação") || full.includes("sem previsao de renovacao") || full.includes("sem previsão") || full.includes("sem previsao")) {
+    return {
+      key: 'SEM_PREVISAO',
+      label: 'Sem Previsão',
+      shortLabel: 'Sem Previsão',
+      badgeClass: 'bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/70 dark:text-sky-300 dark:border-sky-800',
+      pdfTag: '[SEM PREVISÃO]',
+      pdfColor: [2, 132, 199]
+    };
+  }
+
+  if (full.includes("próximo ano") || full.includes("proximo ano") || full.includes("próximo exercício") || full.includes("proximo exercicio")) {
+    return {
+      key: 'POSTPONED',
+      label: 'Próx. Exercício',
+      shortLabel: 'Próx. Exercício',
+      badgeClass: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/70 dark:text-amber-300 dark:border-amber-800',
+      pdfTag: '[PRÓX. EXERCÍCIO]',
+      pdfColor: [217, 119, 6]
+    };
+  }
+
+  return {
+    key: null,
+    label: '',
+    shortLabel: '',
+    badgeClass: '',
+    pdfTag: '',
+    pdfColor: [0, 0, 0]
+  };
+};
+
 export const DocJustificationsTab: React.FC<Props> = ({
   baseFleet,
   justifications,
@@ -83,16 +151,135 @@ export const DocJustificationsTab: React.FC<Props> = ({
   onDeleteJustification,
   renderModernPDFHeader,
   loadPDFLogo,
-  includePdfSummaries
+  includePdfSummaries,
+  theme = 'dark',
+  historyItems = [],
+  onAddHistoryItem
 }) => {
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedPlates, setSelectedPlates] = useState<string[]>([]);
   const [selectedFleets, setSelectedFleets] = useState<string[]>([]);
+  const [selectedOperations, setSelectedOperations] = useState<string[]>([]);
   const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
   const [selectedLicenses, setSelectedLicenses] = useState<string[]>([]);
   const [onlyWithJustification, setOnlyWithJustification] = useState<boolean | null>(null);
   const [cardFilter, setCardFilter] = useState<'ALL' | 'WITH_JUST' | 'PENDING' | 'POSTPONED' | 'GARAGEM' | 'SEM_PREVISAO'>('ALL');
+  // Filtro interativo por cards de status operacional (Imagem 2)
+  const [statusCardFilter, setStatusCardFilter] = useState<'ALL' | 'VENCIDO' | 'CRITICO' | 'ATENCAO' | 'REGULAR'>('ALL');
   const [viewMode, setViewMode] = useState<"table" | "cards">("table");
+
+  // Histórico de justificativas por veículo
+  const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
+  const [historyTargetPlate, setHistoryTargetPlate] = useState<string | null>(null);
+
+  // Combina o histórico persistido com as justificativas ativas para garantir visualização imediata
+  const effectiveHistory = useMemo(() => {
+    const list: JustificationHistoryItem[] = [...(historyItems || [])];
+    const existingIds = new Set(list.map(i => i.justificationId).filter(Boolean));
+    const existingPlateDoc = new Set(
+      list.map(i => `${(i.plate || '').toUpperCase().trim()}#${(i.documentType || '').toUpperCase().trim()}`)
+    );
+
+    (justifications || []).forEach(j => {
+      const plate = (j.plate || '').toUpperCase().trim();
+      const doc = (j.documentType || '').toUpperCase().trim();
+      const key = `${plate}#${doc}`;
+
+      if (!existingIds.has(j.id) && !existingPlateDoc.has(key)) {
+        list.push({
+          id: `hist-active-${j.id}`,
+          justificationId: j.id,
+          plate: j.plate,
+          fleet: j.fleet,
+          operation: j.operation,
+          documentType: j.documentType,
+          status: j.status,
+          reason: j.reason,
+          authorizedBy: j.authorizedBy,
+          actionForecast: j.actionForecast,
+          observations: j.observations,
+          updatedAt: j.updatedAt || 'Registro Vigente',
+          updatedBy: j.updatedBy || 'Gestão da Frota',
+          actionType: 'JUSTIFICATIVA ATIVA'
+        });
+      }
+    });
+
+    return list;
+  }, [historyItems, justifications]);
+
+  const handleOpenHistory = (plate?: string | null) => {
+    setHistoryTargetPlate(plate ? plate.toUpperCase().trim() : null);
+    setIsHistoryModalOpen(true);
+  };
+
+  // Status considerados "Pendentes de Justificativa" para Documentação (Padrão Oficial: Apenas Vencidos)
+  const [pendingStatuses, setPendingStatuses] = useState<string[]>(() => {
+    try {
+      // Limpeza de chaves antigas que gravavam 'VENCIDO' + 'CRITICO' como default
+      localStorage.removeItem("logifleet_doc_pending_statuses");
+      localStorage.removeItem("logifleet_doc_pending_statuses_v2");
+      const saved = localStorage.getItem("logifleet_doc_pending_statuses_v3");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return ['VENCIDO'];
+  });
+
+  const handlePendingStatusesChange = (statuses: string[]) => {
+    setPendingStatuses(statuses);
+    try {
+      localStorage.setItem("logifleet_doc_pending_statuses_v3", JSON.stringify(statuses));
+    } catch {}
+  };
+
+  const pendingStatusesLabel = useMemo(() => {
+    const hasV = pendingStatuses.includes('VENCIDO');
+    const hasC = pendingStatuses.includes('CRITICO');
+    const hasA = pendingStatuses.includes('ATENCAO');
+    const hasR = pendingStatuses.includes('REGULAR');
+
+    if (hasV && !hasC && !hasA && !hasR) return "Apenas Vencidos";
+    if (hasV && hasC && !hasA && !hasR) return "Vencidos + Críticos";
+    if (hasV && hasC && hasA && !hasR) return "Venc. + Crít. + Atenção";
+    if (hasV && hasC && hasA && hasR) return "Todos os Status";
+    if (!hasV && hasC && !hasA && !hasR) return "Apenas Críticos";
+    return `${pendingStatuses.length} Status`;
+  }, [pendingStatuses]);
+
+  // Flegue para selecionar se os cards de resumo devem ser impressos no PDF
+  const [printCardsInPdf, setPrintCardsInPdf] = useState<boolean>(() => {
+    const saved = localStorage.getItem("logifleet_doc_print_cards");
+    if (saved !== null) return saved === "true";
+    return includePdfSummaries ?? true;
+  });
+
+  const handleTogglePrintCards = (checked: boolean) => {
+    setPrintCardsInPdf(checked);
+    localStorage.setItem("logifleet_doc_print_cards", String(checked));
+  };
+
+  // Flegue para incluir documentos regulares (sem pendências) na visualização e exportação
+  const [includeRegularDocs, setIncludeRegularDocs] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem("uni_doc_include_regular_v1");
+      return saved !== null ? JSON.parse(saved) : false;
+    } catch {
+      return false;
+    }
+  });
+
+  const handleToggleIncludeRegular = (val: boolean) => {
+    setIncludeRegularDocs(val);
+    try {
+      localStorage.setItem("uni_doc_include_regular_v1", JSON.stringify(val));
+    } catch {}
+    if (!val && statusCardFilter === 'REGULAR') {
+      setStatusCardFilter('ALL');
+    }
+  };
 
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -325,7 +512,7 @@ export const DocJustificationsTab: React.FC<Props> = ({
     return map;
   }, [justifications]);
 
-  // Extract all alert items from Documentação source vehicles
+  // Extract all items from Documentação source vehicles (both alerts and regulars)
   const alertVehicles = useMemo(() => {
     const items: Array<{
       plate: string;
@@ -336,6 +523,7 @@ export const DocJustificationsTab: React.FC<Props> = ({
       daysRemaining: number;
       expiryDate: string;
       justification?: LicenseJustification;
+      isAlert: boolean;
     }> = [];
 
     const docVehicles = baseFleet.filter(v => v.source === "DOCUMENTACAO" || !v.source);
@@ -352,44 +540,63 @@ export const DocJustificationsTab: React.FC<Props> = ({
     const includedKeySet = new Set<string>();
 
     docVehicles.forEach(v => {
-      const pendingDocs = (v.documents || []).filter(d => 
-        d.status === 'vencido' || d.status === 'critico' || d.status === 'atencao'
-      );
-
       const opFormatted = formatOperationName(v.operation || v.extraData?.["Filial"] || v.client);
-      const p = (v.plate || '').toUpperCase().trim();
+      const p = (v.plate || v.extraData?.["Placa"] || '').toUpperCase().trim();
 
-      if (pendingDocs.length > 0) {
-        pendingDocs.forEach(d => {
-          const rawDoc = (d.type || v.extraData?.["Descrição"] || "Documentação").toUpperCase().trim();
-          const normDoc = normalizeDocKey(rawDoc);
-          const itemStatus = (d.status || '').toUpperCase().trim();
+      const docsList = (v.documents && v.documents.length > 0) 
+        ? v.documents 
+        : [{
+            type: v.extraData?.["Descrição"] || "Documentação",
+            status: v.overallStatus || "ok",
+            daysRemaining: 999,
+            expiryDate: v.extraData?.["Vencimento"] || "-"
+          }];
 
-          // CRITICAL 1:1 ISOLATION: A justification will NEVER match another document!
-          const specificJust = 
-            justMap.get(`${p}#${rawDoc}#${itemStatus}`) ||
-            justMap.get(`${p}#${normDoc}#${itemStatus}`) ||
-            justMap.get(`${p}#${rawDoc}#ANY`) ||
-            justMap.get(`${p}#${normDoc}#ANY`);
+      docsList.forEach(d => {
+        const rawDoc = (d.type || v.extraData?.["Descrição"] || "Documentação").toUpperCase().trim();
+        const normDoc = normalizeDocKey(rawDoc);
+        const rawStatus = (d.status || v.overallStatus || '').toLowerCase().trim();
 
-          includedKeySet.add(`${p}#${normDoc}`);
+        let itemStatus = 'REGULAR';
+        if (rawStatus === 'vencido' || (typeof d.daysRemaining === 'number' && d.daysRemaining <= 0)) {
+          itemStatus = 'VENCIDO';
+        } else if (rawStatus === 'critico' || (typeof d.daysRemaining === 'number' && d.daysRemaining > 0 && d.daysRemaining <= 15)) {
+          itemStatus = 'CRITICO';
+        } else if (rawStatus === 'atencao' || (typeof d.daysRemaining === 'number' && d.daysRemaining > 15 && d.daysRemaining <= 30)) {
+          itemStatus = 'ATENCAO';
+        } else {
+          itemStatus = 'REGULAR';
+        }
 
-          items.push({
-            plate: v.plate || v.extraData?.["Placa"] || "-",
-            fleet: v.fleet || v.extraData?.["Frota"] || "-",
-            operation: opFormatted,
-            documentType: d.type || v.extraData?.["Descrição"] || "Documentação",
-            status: d.status.toUpperCase(),
-            daysRemaining: d.daysRemaining,
-            expiryDate: d.expiryDate || v.extraData?.["Vencimento"] || "-",
-            justification: specificJust
-          });
+        const isAlert = itemStatus === 'VENCIDO' || itemStatus === 'CRITICO' || itemStatus === 'ATENCAO';
+
+        // CRITICAL 1:1 ISOLATION: A justification will NEVER match another document!
+        const specificJust = 
+          justMap.get(`${p}#${rawDoc}#${itemStatus}`) ||
+          justMap.get(`${p}#${normDoc}#${itemStatus}`) ||
+          justMap.get(`${p}#${rawDoc}#ANY`) ||
+          justMap.get(`${p}#${normDoc}#ANY`);
+
+        includedKeySet.add(`${p}#${normDoc}`);
+
+        items.push({
+          plate: v.plate || v.extraData?.["Placa"] || "-",
+          fleet: v.fleet || v.extraData?.["Frota"] || "-",
+          operation: opFormatted,
+          documentType: d.type || v.extraData?.["Descrição"] || "Documentação",
+          status: itemStatus,
+          daysRemaining: typeof d.daysRemaining === 'number' ? d.daysRemaining : 999,
+          expiryDate: d.expiryDate || v.extraData?.["Vencimento"] || "-",
+          justification: specificJust,
+          isAlert
         });
-      } else {
-        const plateJusts = justByPlate.get(p) || [];
-        plateJusts.forEach(genJust => {
-          const docType = (genJust.documentType || v.extraData?.["Descrição"] || "Documentação Geral").toUpperCase().trim();
-          const normDoc = normalizeDocKey(docType);
+      });
+
+      const plateJusts = justByPlate.get(p) || [];
+      plateJusts.forEach(genJust => {
+        const docType = (genJust.documentType || v.extraData?.["Descrição"] || "Documentação Geral").toUpperCase().trim();
+        const normDoc = normalizeDocKey(docType);
+        if (!includedKeySet.has(`${p}#${normDoc}`)) {
           includedKeySet.add(`${p}#${normDoc}`);
           items.push({
             plate: v.plate || v.extraData?.["Placa"] || "-",
@@ -399,10 +606,11 @@ export const DocJustificationsTab: React.FC<Props> = ({
             status: (genJust.status || "OK").toUpperCase(),
             daysRemaining: 999,
             expiryDate: v.extraData?.["Vencimento"] || "-",
-            justification: genJust
+            justification: genJust,
+            isAlert: false
           });
-        });
-      }
+        }
+      });
     });
 
     // Also include any justification for plates not found in baseFleet (e.g. manually entered)
@@ -422,7 +630,8 @@ export const DocJustificationsTab: React.FC<Props> = ({
           status: j.status || "VENCIDO",
           daysRemaining: 0,
           expiryDate: "-",
-          justification: j
+          justification: j,
+          isAlert: true
         });
       }
     }
@@ -510,75 +719,51 @@ export const DocJustificationsTab: React.FC<Props> = ({
     }));
   }, [licensesList, alertVehicles]);
 
-  // Options for MultiSelect Status
-  const statusOptions: MultiSelectOption[] = useMemo(() => {
-    let countVencido = 0;
-    let countCritico = 0;
-    let countAtencao = 0;
-    let countOk = 0;
-
+  // Distinct operations
+  const operationsList = useMemo(() => {
+    const set = new Set<string>();
     alertVehicles.forEach(it => {
-      const s = (it.status || '').toUpperCase();
-      if (s === 'VENCIDO') countVencido++;
-      else if (s === 'CRITICO') countCritico++;
-      else if (s === 'ATENCAO') countAtencao++;
-      else countOk++;
+      if (it.operation && it.operation !== "-") set.add(it.operation.trim());
     });
-
-    return [
-      {
-        value: 'VENCIDO',
-        label: 'Vencido',
-        count: countVencido,
-        colorDot: 'bg-rose-500',
-        icon: <XCircle size={13} className="text-rose-500" />
-      },
-      {
-        value: 'CRITICO',
-        label: 'Crítico (≤ 15d)',
-        count: countCritico,
-        colorDot: 'bg-amber-500',
-        icon: <AlertTriangle size={13} className="text-amber-500" />
-      },
-      {
-        value: 'ATENCAO',
-        label: 'Em Atenção (≤ 30d)',
-        count: countAtencao,
-        colorDot: 'bg-blue-500',
-        icon: <Clock size={13} className="text-blue-500" />
-      },
-      {
-        value: 'OK',
-        label: 'Regular / Outros',
-        count: countOk,
-        colorDot: 'bg-emerald-500',
-        icon: <CheckCircle2 size={13} className="text-emerald-500" />
-      }
-    ];
+    return Array.from(set).sort();
   }, [alertVehicles]);
 
-  // Filtered rows - optimized with Sets and normalized search
-  const filteredItems = useMemo(() => {
+  // Options for MultiSelect Operação (Padrão da Imagem 2)
+  const operationOptions: MultiSelectOption[] = useMemo(() => {
+    const counts = new Map<string, number>();
+    alertVehicles.forEach(it => {
+      if (it.operation && it.operation !== "-") {
+        const op = it.operation.trim();
+        counts.set(op, (counts.get(op) || 0) + 1);
+      }
+    });
+    return operationsList.map(op => ({
+      value: op,
+      label: op,
+      count: counts.get(op) || 0,
+      icon: <Building2 size={13} className="text-slate-400 shrink-0" />
+    }));
+  }, [operationsList, alertVehicles]);
+
+  // 1. Filtragem dimensional base: busca textual, placas, frotas, operações e documentos
+  const dimFilteredItems = useMemo(() => {
     const term = searchTerm ? searchTerm.toLowerCase().trim() : "";
     const platesSet = selectedPlates.length > 0 ? new Set(selectedPlates.map(sp => sp.toUpperCase().trim())) : null;
     const fleetsSet = selectedFleets.length > 0 ? new Set(selectedFleets.map(sf => String(sf).trim())) : null;
+    const operationsSet = selectedOperations.length > 0 ? new Set(selectedOperations.map(so => so.toUpperCase().trim())) : null;
     const licensesSet = selectedLicenses.length > 0 ? new Set(selectedLicenses.map(sl => sl.toUpperCase().trim())) : null;
-    const statusesSet = selectedStatuses.length > 0 ? new Set(selectedStatuses) : null;
 
     return alertVehicles.filter(it => {
-      // Filter by license (multi-select / flegue)
+      // Filter by operation (multi-select / flegue - Padrão Imagem 2)
+      if (operationsSet) {
+        if (!it.operation || !operationsSet.has(it.operation.trim().toUpperCase())) return false;
+      }
+
+      // Filter by document type (multi-select / flegue)
       if (licensesSet) {
         if (!it.documentType || !licensesSet.has(it.documentType.trim().toUpperCase())) return false;
       }
-      
-      // Filter by status (multi-select / flegue)
-      if (statusesSet) {
-        const itemStatus = (it.status || '').toUpperCase();
-        const matchesStatus = statusesSet.has(itemStatus) || 
-          (statusesSet.has('OK') && itemStatus !== 'VENCIDO' && itemStatus !== 'CRITICO' && itemStatus !== 'ATENCAO');
-        if (!matchesStatus) return false;
-      }
-      
+
       // Filter by plate (multi-select / flegue)
       if (platesSet) {
         if (!it.plate || !platesSet.has(it.plate.trim().toUpperCase())) return false;
@@ -587,27 +772,6 @@ export const DocJustificationsTab: React.FC<Props> = ({
       // Filter by fleet (multi-select / flegue)
       if (fleetsSet) {
         if (!it.fleet || !fleetsSet.has(String(it.fleet).trim())) return false;
-      }
-
-      if (onlyWithJustification === true && !it.justification) return false;
-      if (onlyWithJustification === false && it.justification) return false;
-
-      // Card quick filters
-      if (cardFilter === 'WITH_JUST' && !it.justification) return false;
-      if (cardFilter === 'PENDING' && (it.justification || (it.status !== 'VENCIDO' && it.status !== 'CRITICO'))) return false;
-      if (cardFilter === 'POSTPONED') {
-        const txt = (it.justification?.reason || "") + " " + (it.justification?.actionForecast || "");
-        if (!txt.toLowerCase().includes("próximo ano") && !txt.toLowerCase().includes("proximo ano") && !txt.toLowerCase().includes("próximo exercício") && !txt.toLowerCase().includes("proximo exercicio")) return false;
-      }
-      if (cardFilter === 'GARAGEM') {
-        const txt = (it.justification?.reason || "") + " " + (it.justification?.observations || "");
-        const lower = txt.toLowerCase();
-        if (!lower.includes("parado no garagem") && !lower.includes("parado na garagem") && !lower.includes("garagem")) return false;
-      }
-      if (cardFilter === 'SEM_PREVISAO') {
-        const txt = (it.justification?.reason || "") + " " + (it.justification?.actionForecast || "") + " " + (it.justification?.observations || "");
-        const lower = txt.toLowerCase();
-        if (!lower.includes("sem previsão de renovação") && !lower.includes("sem previsao de renovacao") && !lower.includes("sem previsão") && !lower.includes("sem previsao")) return false;
       }
 
       if (term) {
@@ -624,7 +788,219 @@ export const DocJustificationsTab: React.FC<Props> = ({
 
       return true;
     });
-  }, [alertVehicles, selectedLicenses, selectedStatuses, selectedPlates, selectedFleets, onlyWithJustification, cardFilter, searchTerm]);
+  }, [alertVehicles, selectedOperations, selectedLicenses, selectedPlates, selectedFleets, searchTerm]);
+
+  // 2. Universo para cálculo dos Cards de Status Operacional (interage com filtros de governança)
+  const itemsForStatusStats = useMemo(() => {
+    return dimFilteredItems.filter(it => {
+      if (cardFilter === 'WITH_JUST' || onlyWithJustification === true) {
+        if (!it.justification) return false;
+      }
+      if (cardFilter === 'PENDING' || onlyWithJustification === false) {
+        if (it.justification) return false;
+        const s = (it.status || '').toUpperCase().trim();
+        const matchesPending = pendingStatuses.includes(s) || 
+          (pendingStatuses.includes('REGULAR') && (s === 'REGULAR' || s === 'OK'));
+        if (!matchesPending) return false;
+      }
+      if (cardFilter === 'POSTPONED') {
+        const txt = (it.justification?.reason || "") + " " + (it.justification?.actionForecast || "");
+        if (!txt.toLowerCase().includes("próximo ano") && !txt.toLowerCase().includes("proximo ano") && !txt.toLowerCase().includes("próximo exercício") && !txt.toLowerCase().includes("proximo exercicio")) return false;
+      }
+      if (cardFilter === 'GARAGEM') {
+        const txt = (it.justification?.reason || "") + " " + (it.justification?.observations || "");
+        const lower = txt.toLowerCase();
+        if (!lower.includes("parado no garagem") && !lower.includes("parado na garagem") && !lower.includes("garagem")) return false;
+      }
+      if (cardFilter === 'SEM_PREVISAO') {
+        const txt = (it.justification?.reason || "") + " " + (it.justification?.actionForecast || "") + " " + (it.justification?.observations || "");
+        const lower = txt.toLowerCase();
+        if (!lower.includes("sem previsão de renovação") && !lower.includes("sem previsao de renovacao") && !lower.includes("sem previsão") && !lower.includes("sem previsao")) return false;
+      }
+      return true;
+    });
+  }, [dimFilteredItems, cardFilter, onlyWithJustification, pendingStatuses]);
+
+  // Contadores específicos de status operacional dos documentos - interagem 100% com os filtros
+  const statusStats = useMemo(() => {
+    let vencido = 0;
+    let critico = 0;
+    let atencao = 0;
+    let regular = 0;
+
+    itemsForStatusStats.forEach(it => {
+      const s = (it.status || '').toUpperCase();
+      if (s === 'VENCIDO') vencido++;
+      else if (s === 'CRITICO') critico++;
+      else if (s === 'ATENCAO') atencao++;
+      else regular++;
+    });
+
+    return { vencido, critico, atencao, regular, total: itemsForStatusStats.length };
+  }, [itemsForStatusStats]);
+
+  // Options for MultiSelect Status (reflete fielmente os status com contadores dinâmicos)
+  const statusOptions: MultiSelectOption[] = useMemo(() => {
+    return [
+      {
+        value: 'VENCIDO',
+        label: 'Vencido',
+        count: statusStats.vencido,
+        colorDot: 'bg-rose-500',
+        icon: <XCircle size={13} className="text-rose-500" />
+      },
+      {
+        value: 'CRITICO',
+        label: 'Crítico (≤ 15d)',
+        count: statusStats.critico,
+        colorDot: 'bg-amber-500',
+        icon: <AlertTriangle size={13} className="text-amber-500" />
+      },
+      {
+        value: 'ATENCAO',
+        label: 'Em Atenção (≤ 30d)',
+        count: statusStats.atencao,
+        colorDot: 'bg-blue-500',
+        icon: <Clock size={13} className="text-blue-500" />
+      },
+      {
+        value: 'OK',
+        label: 'Regular / Outros',
+        count: statusStats.regular,
+        colorDot: 'bg-emerald-500',
+        icon: <CheckCircle2 size={13} className="text-emerald-500" />
+      }
+    ];
+  }, [statusStats]);
+
+  // 3. Universo para cálculo dos Cards de Governança (interage com filtros de status operacional)
+  const itemsForGovStats = useMemo(() => {
+    const statusesSet = selectedStatuses.length > 0 ? new Set(selectedStatuses) : null;
+    return dimFilteredItems.filter(it => {
+      // Filter by statusCardFilter (Cards Operacionais)
+      if (statusCardFilter === 'VENCIDO' && it.status !== 'VENCIDO') return false;
+      if (statusCardFilter === 'CRITICO' && it.status !== 'CRITICO') return false;
+      if (statusCardFilter === 'ATENCAO' && it.status !== 'ATENCAO') return false;
+      if (statusCardFilter === 'REGULAR' && (it.status !== 'REGULAR' && it.status !== 'OK')) return false;
+
+      // Filter by status (multi-select / flegue)
+      if (statusesSet) {
+        const itemStatus = (it.status || '').toUpperCase();
+        const matchesStatus = statusesSet.has(itemStatus) || 
+          ((statusesSet.has('OK') || statusesSet.has('REGULAR')) && (itemStatus === 'REGULAR' || itemStatus === 'OK' || (itemStatus !== 'VENCIDO' && itemStatus !== 'CRITICO' && itemStatus !== 'ATENCAO')));
+        if (!matchesStatus) return false;
+      }
+
+      return true;
+    });
+  }, [dimFilteredItems, statusCardFilter, selectedStatuses]);
+
+  // Contagens dos status dos alertas sem justificativa (para o seletor de critério de pendência)
+  const pendingStatusCounts = useMemo(() => {
+    let vencido = 0;
+    let critico = 0;
+    let atencao = 0;
+    let regular = 0;
+    itemsForGovStats.forEach(it => {
+      if (!it.justification) {
+        const s = (it.status || '').toUpperCase().trim();
+        if (s === 'VENCIDO') vencido++;
+        else if (s === 'CRITICO') critico++;
+        else if (s === 'ATENCAO') atencao++;
+        else regular++;
+      }
+    });
+    return { vencido, critico, atencao, regular };
+  }, [itemsForGovStats]);
+
+  // Statistics (Governança da Documentação - interagem 100% com os filtros)
+  const stats = useMemo(() => {
+    const isRegularFilterActive = statusCardFilter === 'REGULAR' || 
+      includeRegularDocs || 
+      selectedStatuses.some(s => s === 'OK' || s === 'REGULAR');
+    const alertsOnly = itemsForGovStats.filter(it => isRegularFilterActive ? true : (it.isAlert || !!it.justification));
+    const total = alertsOnly.length;
+    const withJust = alertsOnly.filter(it => !!it.justification).length;
+    const pendingSet = new Set(pendingStatuses);
+    const pendingJust = alertsOnly.filter(it => {
+      if (it.justification) return false;
+      const s = (it.status || '').toUpperCase().trim();
+      return pendingSet.has(s) || (pendingSet.has('REGULAR') && (s === 'REGULAR' || s === 'OK'));
+    }).length;
+    const nextYearPostponed = alertsOnly.filter(it => {
+      const cat = getJustificationCategoryInfo(it.justification?.reason, it.justification?.actionForecast, it.justification?.observations);
+      return cat.key === 'POSTPONED';
+    }).length;
+    const paradoGaragem = alertsOnly.filter(it => {
+      const cat = getJustificationCategoryInfo(it.justification?.reason, it.justification?.actionForecast, it.justification?.observations);
+      return cat.key === 'GARAGEM';
+    }).length;
+    const semPrevisao = alertsOnly.filter(it => {
+      const cat = getJustificationCategoryInfo(it.justification?.reason, it.justification?.actionForecast, it.justification?.observations);
+      return cat.key === 'SEM_PREVISAO';
+    }).length;
+
+    return { total, withJust, pendingJust, nextYearPostponed, paradoGaragem, semPrevisao };
+  }, [itemsForGovStats, pendingStatuses, statusCardFilter, includeRegularDocs, selectedStatuses]);
+
+  // 4. Filtered rows - final data for Table & Cards
+  const filteredItems = useMemo(() => {
+    const statusesSet = selectedStatuses.length > 0 ? new Set(selectedStatuses) : null;
+    const shouldIncludeRegulars = includeRegularDocs || statusCardFilter === 'REGULAR' || (statusesSet && (statusesSet.has('OK') || statusesSet.has('REGULAR')));
+    const pendingSet = new Set(pendingStatuses);
+
+    return dimFilteredItems.filter(it => {
+      // Se não estiver com flegue de regulares ativo, oculta itens que não sejam alerta
+      if (!shouldIncludeRegulars && !it.isAlert) {
+        return false;
+      }
+
+      // Filter by statusCardFilter (Cards Operacionais)
+      if (statusCardFilter === 'VENCIDO' && it.status !== 'VENCIDO') return false;
+      if (statusCardFilter === 'CRITICO' && it.status !== 'CRITICO') return false;
+      if (statusCardFilter === 'ATENCAO' && it.status !== 'ATENCAO') return false;
+      if (statusCardFilter === 'REGULAR' && (it.status !== 'REGULAR' && it.status !== 'OK')) return false;
+
+      // Filter by status (multi-select / flegue)
+      if (statusesSet) {
+        const itemStatus = (it.status || '').toUpperCase();
+        const matchesStatus = statusesSet.has(itemStatus) || 
+          ((statusesSet.has('OK') || statusesSet.has('REGULAR')) && (itemStatus === 'REGULAR' || itemStatus === 'OK' || (itemStatus !== 'VENCIDO' && itemStatus !== 'CRITICO' && itemStatus !== 'ATENCAO')));
+        if (!matchesStatus) return false;
+      }
+
+      if (onlyWithJustification === true && !it.justification) return false;
+      if (onlyWithJustification === false) {
+        if (it.justification) return false;
+        const s = (it.status || '').toUpperCase().trim();
+        const matchesPending = pendingSet.has(s) || (pendingSet.has('REGULAR') && (s === 'REGULAR' || s === 'OK'));
+        if (!matchesPending) return false;
+      }
+
+      // Card quick filters
+      if (cardFilter === 'WITH_JUST' && !it.justification) return false;
+      if (cardFilter === 'PENDING') {
+        if (it.justification) return false;
+        const s = (it.status || '').toUpperCase().trim();
+        const matchesPending = pendingSet.has(s) || (pendingSet.has('REGULAR') && (s === 'REGULAR' || s === 'OK'));
+        if (!matchesPending) return false;
+      }
+      if (cardFilter === 'POSTPONED') {
+        const cat = getJustificationCategoryInfo(it.justification?.reason, it.justification?.actionForecast, it.justification?.observations);
+        if (cat.key !== 'POSTPONED') return false;
+      }
+      if (cardFilter === 'GARAGEM') {
+        const cat = getJustificationCategoryInfo(it.justification?.reason, it.justification?.actionForecast, it.justification?.observations);
+        if (cat.key !== 'GARAGEM') return false;
+      }
+      if (cardFilter === 'SEM_PREVISAO') {
+        const cat = getJustificationCategoryInfo(it.justification?.reason, it.justification?.actionForecast, it.justification?.observations);
+        if (cat.key !== 'SEM_PREVISAO') return false;
+      }
+
+      return true;
+    });
+  }, [dimFilteredItems, selectedStatuses, onlyWithJustification, cardFilter, statusCardFilter, includeRegularDocs, pendingStatuses]);
 
   // High-performance pagination state
   const [currentPage, setCurrentPage] = useState<number>(1);
@@ -633,7 +1009,7 @@ export const DocJustificationsTab: React.FC<Props> = ({
   // Reset to first page when filtering changes
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchTerm, selectedPlates, selectedFleets, selectedLicenses, selectedStatuses, cardFilter, onlyWithJustification]);
+  }, [searchTerm, selectedPlates, selectedFleets, selectedOperations, selectedLicenses, selectedStatuses, cardFilter, statusCardFilter, includeRegularDocs, onlyWithJustification, pendingStatuses]);
 
   const totalPages = Math.max(1, Math.ceil(filteredItems.length / pageSize));
   const validCurrentPage = Math.min(currentPage, totalPages);
@@ -643,29 +1019,6 @@ export const DocJustificationsTab: React.FC<Props> = ({
     const start = (validCurrentPage - 1) * pageSize;
     return filteredItems.slice(start, start + pageSize);
   }, [filteredItems, validCurrentPage, pageSize]);
-
-  // Statistics
-  const stats = useMemo(() => {
-    const total = alertVehicles.length;
-    const withJust = alertVehicles.filter(it => !!it.justification).length;
-    const pendingJust = alertVehicles.filter(it => !it.justification && (it.status === 'VENCIDO' || it.status === 'CRITICO')).length;
-    const nextYearPostponed = alertVehicles.filter(it => {
-      const txt = (it.justification?.reason || "") + " " + (it.justification?.actionForecast || "");
-      return txt.toLowerCase().includes("próximo ano") || txt.toLowerCase().includes("proximo ano") || txt.toLowerCase().includes("próximo exercício");
-    }).length;
-    const paradoGaragem = alertVehicles.filter(it => {
-      const txt = (it.justification?.reason || "") + " " + (it.justification?.observations || "");
-      const lower = txt.toLowerCase();
-      return lower.includes("parado no garagem") || lower.includes("parado na garagem") || lower.includes("garagem");
-    }).length;
-    const semPrevisao = alertVehicles.filter(it => {
-      const txt = (it.justification?.reason || "") + " " + (it.justification?.actionForecast || "") + " " + (it.justification?.observations || "");
-      const lower = txt.toLowerCase();
-      return lower.includes("sem previsão de renovação") || lower.includes("sem previsao de renovacao") || lower.includes("sem previsão") || lower.includes("sem previsao");
-    }).length;
-
-    return { total, withJust, pendingJust, nextYearPostponed, paradoGaragem, semPrevisao };
-  }, [alertVehicles]);
 
   const getRowKey = (plate: string, docType: string, status?: string) => 
     `${(plate || '').toUpperCase().trim()}#${normalizeDocKey(docType)}#${(status || '').toUpperCase().trim()}`;
@@ -922,7 +1275,7 @@ export const DocJustificationsTab: React.FC<Props> = ({
   };
 
   // EXPORT JUSTIFICATIONS PDF REPORT
-  const exportJustificationsPDF = async () => {
+  const exportJustificationsPDF = async (isDirectPrint: boolean = false) => {
     const doc = new jsPDF({ orientation: 'landscape', format: 'a4' });
     const pageWidth = doc.internal.pageSize.getWidth();
     const loadedImg = await loadPDFLogo();
@@ -938,63 +1291,225 @@ export const DocJustificationsTab: React.FC<Props> = ({
 
     let startY = 42;
 
-    if (includePdfSummaries) {
-      doc.setFillColor(248, 250, 252);
-      doc.roundedRect(14, startY, pageWidth - 28, 20, 2, 2, 'F');
-      doc.setDrawColor(226, 232, 240);
-      doc.roundedRect(14, startY, pageWidth - 28, 20, 2, 2, 'S');
+    // Resumo Executivo em Cards (Flegue ativável antes da impressão/salvamento)
+    // Regra estrita: exibir todos os cards disponíveis no sistema separados e NÃO exibir cards zerados
+    if (printCardsInPdf) {
+      // 1. Cards de Governança e Justificativas da Frota
+      const allGovernanceCards = [
+        {
+          key: 'total',
+          label: 'ALERTAS DOCS',
+          subtitle: 'Total de Guias',
+          value: Number(stats.total) || 0,
+          color: [30, 58, 138] // azul marinho escuro
+        },
+        {
+          key: 'withJust',
+          label: 'COM JUSTIF.',
+          subtitle: 'Registros ativos',
+          value: Number(stats.withJust) || 0,
+          color: [16, 124, 65] // verde esmeralda
+        },
+        {
+          key: 'pendingJust',
+          label: 'SEM JUSTIF.',
+          subtitle: 'Sem justificativa',
+          value: Number(stats.pendingJust) || 0,
+          color: [220, 38, 38] // vermelho
+        },
+        {
+          key: 'nextYearPostponed',
+          label: 'POSTERGADOS (JUSTIF.)',
+          subtitle: 'Próx. Exercício (Subdivisão)',
+          value: Number(stats.nextYearPostponed) || 0,
+          color: [217, 119, 6] // âmbar
+        },
+        {
+          key: 'paradoGaragem',
+          label: 'PARADO GARAGEM (JUSTIF.)',
+          subtitle: 'Autorizações (Subdivisão)',
+          value: Number(stats.paradoGaragem) || 0,
+          color: [79, 70, 229] // índigo
+        },
+        {
+          key: 'semPrevisao',
+          label: 'SEM PREVISÃO (JUSTIF.)',
+          subtitle: 'Prazos & Ops (Subdivisão)',
+          value: Number(stats.semPrevisao) || 0,
+          color: [2, 132, 199] // sky / ciano
+        }
+      ];
 
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(8);
-      doc.setTextColor(71, 85, 105);
-      doc.text("RESUMO DE JUSTIFICATIVAS & GOVERNANÇA DE DOCUMENTAÇÃO", 20, startY + 6);
+      // 2. Cards de Status Operacional dos Documentos (Imagem 2 - SEPARADOS)
+      const allStatusCards = [
+        {
+          key: 'vencido',
+          label: 'VENCIDOS',
+          subtitle: 'Prazos expirados',
+          value: Number(statusStats.vencido) || 0,
+          color: [220, 38, 38] // vermelho
+        },
+        {
+          key: 'critico',
+          label: 'CRÍTICOS (≤ 15d)',
+          subtitle: 'Vencem em até 15d',
+          value: Number(statusStats.critico) || 0,
+          color: [217, 119, 6] // âmbar
+        },
+        {
+          key: 'atencao',
+          label: 'EM ATENÇÃO (≤ 30d)',
+          subtitle: 'Vencem em até 30d',
+          value: Number(statusStats.atencao) || 0,
+          color: [2, 132, 199] // sky / azul
+        },
+        {
+          key: 'regular',
+          label: 'REGULARES / EM DIA',
+          subtitle: 'Sem pendências',
+          value: Number(statusStats.regular) || 0,
+          color: [16, 124, 65] // verde esmeralda
+        }
+      ];
 
-      const colW = (pageWidth - 40) / 4;
-      const kpiY = startY + 14;
+      // Filtro estrito: Oculta qualquer card com valor 0
+      const activeGovCards = allGovernanceCards.filter(c => c.value > 0);
+      const activeStatusCards = allStatusCards.filter(c => c.value > 0);
 
-      doc.setFontSize(7);
-      doc.setTextColor(100, 116, 139);
-      doc.text("TOTAL DE ALERTAS:", 20, kpiY);
-      doc.setFontSize(9);
-      doc.setTextColor(30, 58, 138);
-      doc.text(String(stats.total), 55, kpiY);
+      // Renderização do Banner 1: Governança
+      if (activeGovCards.length > 0) {
+        const bannerH = 19;
+        doc.setFillColor(248, 250, 252);
+        doc.roundedRect(14, startY, pageWidth - 28, bannerH, 2, 2, 'F');
+        doc.setDrawColor(226, 232, 240);
+        doc.roundedRect(14, startY, pageWidth - 28, bannerH, 2, 2, 'S');
 
-      doc.setFontSize(7);
-      doc.setTextColor(100, 116, 139);
-      doc.text("COM JUSTIFICATIVA:", 20 + colW, kpiY);
-      doc.setFontSize(9);
-      doc.setTextColor(16, 124, 65);
-      doc.text(String(stats.withJust), 20 + colW + 40, kpiY);
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(6.8);
+        doc.setTextColor(71, 85, 105);
+        doc.text("GOVERNANÇA & JUSTIFICATIVAS DA FROTA", 18, startY + 4.5);
 
-      doc.setFontSize(7);
-      doc.setTextColor(100, 116, 139);
-      doc.text("PENDENTES DE JUSTIFICATIVA:", 20 + (colW * 2), kpiY);
-      doc.setFontSize(9);
-      doc.setTextColor(220, 38, 38);
-      doc.text(String(stats.pendingJust), 20 + (colW * 2) + 52, kpiY);
+        const innerStartX = 18;
+        const innerAvailableW = pageWidth - 36;
+        const gap = 3;
+        const cardW = (innerAvailableW - (gap * (activeGovCards.length - 1))) / activeGovCards.length;
+        const cardH = 12;
+        const cardY = startY + 5.5;
 
-      doc.setFontSize(7);
-      doc.setTextColor(100, 116, 139);
-      doc.text("POSTERGADOS (PRÓX. ANO):", 20 + (colW * 3), kpiY);
-      doc.setFontSize(9);
-      doc.setTextColor(217, 119, 6);
-      doc.text(String(stats.nextYearPostponed), 20 + (colW * 3) + 48, kpiY);
+        activeGovCards.forEach((c, idx) => {
+          const cardX = innerStartX + idx * (cardW + gap);
 
-      startY += 24;
+          // Card branco de fundo
+          doc.setFillColor(255, 255, 255);
+          doc.roundedRect(cardX, cardY, cardW, cardH, 1.2, 1.2, 'F');
+          doc.setDrawColor(226, 232, 240);
+          doc.roundedRect(cardX, cardY, cardW, cardH, 1.2, 1.2, 'S');
+
+          // Mini barra superior de destaque na cor do indicador
+          doc.setFillColor(c.color[0], c.color[1], c.color[2]);
+          doc.roundedRect(cardX, cardY, cardW, 1.1, 0.5, 0.5, 'F');
+
+          // Título do Card
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(5.8);
+          doc.setTextColor(100, 116, 139);
+          doc.text(c.label, cardX + 2.2, cardY + 4.2);
+
+          // Valor numérico em destaque
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(9.5);
+          doc.setTextColor(c.color[0], c.color[1], c.color[2]);
+          doc.text(String(c.value), cardX + 2.2, cardY + 8.8);
+
+          // Subtítulo descritivo alinhado à direita
+          if (c.subtitle && cardW > 28) {
+            doc.setFont("helvetica", "normal");
+            doc.setFontSize(4.8);
+            doc.setTextColor(148, 163, 184);
+            doc.text(c.subtitle, cardX + cardW - 2.2, cardY + 8.8, { align: 'right' });
+          }
+        });
+
+        startY += bannerH + 2.5;
+      }
+
+      // Renderização do Banner 2: Status Operacional dos Documentos & Prazos (SEPARADO)
+      if (activeStatusCards.length > 0) {
+        const bannerH = 19;
+        doc.setFillColor(248, 250, 252);
+        doc.roundedRect(14, startY, pageWidth - 28, bannerH, 2, 2, 'F');
+        doc.setDrawColor(226, 232, 240);
+        doc.roundedRect(14, startY, pageWidth - 28, bannerH, 2, 2, 'S');
+
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(6.8);
+        doc.setTextColor(71, 85, 105);
+        doc.text("STATUS OPERACIONAL DOS DOCUMENTOS & PRAZOS (DOCUMENTAÇÃO)", 18, startY + 4.5);
+
+        const innerStartX = 18;
+        const innerAvailableW = pageWidth - 36;
+        const gap = 3;
+        const cardW = (innerAvailableW - (gap * (activeStatusCards.length - 1))) / activeStatusCards.length;
+        const cardH = 12;
+        const cardY = startY + 5.5;
+
+        activeStatusCards.forEach((c, idx) => {
+          const cardX = innerStartX + idx * (cardW + gap);
+
+          // Card branco de fundo
+          doc.setFillColor(255, 255, 255);
+          doc.roundedRect(cardX, cardY, cardW, cardH, 1.2, 1.2, 'F');
+          doc.setDrawColor(226, 232, 240);
+          doc.roundedRect(cardX, cardY, cardW, cardH, 1.2, 1.2, 'S');
+
+          // Mini barra superior de destaque na cor do indicador
+          doc.setFillColor(c.color[0], c.color[1], c.color[2]);
+          doc.roundedRect(cardX, cardY, cardW, 1.1, 0.5, 0.5, 'F');
+
+          // Título do Card
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(5.8);
+          doc.setTextColor(100, 116, 139);
+          doc.text(c.label, cardX + 2.2, cardY + 4.2);
+
+          // Valor numérico em destaque
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(9.5);
+          doc.setTextColor(c.color[0], c.color[1], c.color[2]);
+          doc.text(String(c.value), cardX + 2.2, cardY + 8.8);
+
+          // Subtítulo descritivo alinhado à direita
+          if (c.subtitle && cardW > 28) {
+            doc.setFont("helvetica", "normal");
+            doc.setFontSize(4.8);
+            doc.setTextColor(148, 163, 184);
+            doc.text(c.subtitle, cardX + cardW - 2.2, cardY + 8.8, { align: 'right' });
+          }
+        });
+
+        startY += bannerH + 4;
+      }
     }
 
     const tableBody = filteredItems.map(it => {
       const j = it.justification;
+      const isRegular = it.status === 'REGULAR' || it.status === 'OK' || !it.isAlert;
+      const cat = getJustificationCategoryInfo(j?.reason, j?.actionForecast, j?.observations);
+      let reasonText = j?.reason || (isRegular ? "Regular / Sem pendência" : "Pendente de justificativa");
+      if (cat.key && j?.reason) {
+        reasonText = `${cat.pdfTag} ${reasonText}`;
+      }
+
       return [
         it.plate,
         it.fleet,
         it.operation,
         it.documentType,
-        it.status,
-        j?.reason || "Pendente de justificativa",
+        isRegular ? "REGULAR" : it.status,
+        reasonText,
         j?.authorizedBy || "-",
-        j?.actionForecast || "-",
-        j?.observations || "-"
+        j?.actionForecast || (isRegular ? "Em dia" : "-"),
+        j?.observations || (isRegular ? "Documento regular sem pendências" : "-")
       ];
     });
 
@@ -1039,9 +1554,20 @@ export const DocJustificationsTab: React.FC<Props> = ({
         }
         if (data.section === 'body' && data.column.index === 5) {
           const reason = String(data.cell.raw || '');
-          if (reason === "Pendente de justificativa") {
+          if (reason.startsWith('[PARADO NO GARAGEM]')) {
+            data.cell.styles.textColor = [79, 70, 229]; // índigo
+            data.cell.styles.fontStyle = 'bold';
+          } else if (reason.startsWith('[SEM PREVISÃO]')) {
+            data.cell.styles.textColor = [2, 132, 199]; // sky
+            data.cell.styles.fontStyle = 'bold';
+          } else if (reason.startsWith('[PRÓX. EXERCÍCIO]')) {
+            data.cell.styles.textColor = [217, 119, 6]; // âmbar
+            data.cell.styles.fontStyle = 'bold';
+          } else if (reason === "Pendente de justificativa") {
             data.cell.styles.textColor = [156, 163, 175];
             data.cell.styles.fontStyle = 'italic';
+          } else if (reason.includes("Regular / Sem pendência")) {
+            data.cell.styles.textColor = [16, 124, 65];
           }
         }
       }
@@ -1075,7 +1601,13 @@ export const DocJustificationsTab: React.FC<Props> = ({
       );
     }
 
-    doc.save(`Relatorio_Justificativas_Documentacao_${format(new Date(), "dd-MM-yyyy")}.pdf`);
+    if (isDirectPrint) {
+      doc.autoPrint();
+      const blobUrl = doc.output('bloburl');
+      window.open(blobUrl, '_blank');
+    } else {
+      doc.save(`Relatorio_Justificativas_Documentacao_${format(new Date(), "dd-MM-yyyy")}.pdf`);
+    }
   };
 
   const exportJustificationsExcel = () => {
@@ -1087,6 +1619,7 @@ export const DocJustificationsTab: React.FC<Props> = ({
         "Operação": formatOperationName(item.operation),
         "Documento": item.documentType || "-",
         "Status": item.status || "VENCIDO",
+        "Subtipo de Justificativa": getJustificationCategoryInfo(item.justification?.reason, item.justification?.actionForecast, item.justification?.observations).label || (item.justification ? "Geral" : "-"),
         "Motivo da Pendência": item.justification?.reason || "Pendente de justificativa",
         "Quem Autorizou": item.justification?.authorizedBy || "-",
         "Previsão / Condição": item.justification?.actionForecast || "-",
@@ -1174,13 +1707,85 @@ export const DocJustificationsTab: React.FC<Props> = ({
             <span>Extrair em Excel</span>
           </button>
 
+          {/* Flegue para incluir documentos regulares (sem pendências) na visualização e relatórios */}
+          <label 
+            id="flegue-include-regular-doc"
+            className="flex items-center gap-2 px-3.5 py-2.5 rounded-2xl text-xs font-bold bg-slate-800/90 hover:bg-slate-700/90 border border-slate-600/70 text-slate-100 shadow-sm transition-all cursor-pointer select-none"
+            title="Flegue para incluir e visualizar também documentos regulares sem pendências"
+          >
+            <input 
+              type="checkbox" 
+              checked={includeRegularDocs} 
+              onChange={(e) => handleToggleIncludeRegular(e.target.checked)}
+              className="w-4 h-4 rounded border-slate-500 text-emerald-500 focus:ring-emerald-500 cursor-pointer accent-emerald-500"
+            />
+            <span className="text-slate-300">Exibir Regulares:</span>
+            <span className={cn(
+              "text-[10px] font-black uppercase px-2 py-0.5 rounded-md tracking-wider transition-all",
+              includeRegularDocs 
+                ? "bg-emerald-500/30 text-emerald-300 border border-emerald-400/40 shadow-xs shadow-emerald-500/20" 
+                : "bg-slate-700/60 text-slate-400 border border-slate-600"
+            )}>
+              {includeRegularDocs ? "SIM" : "NÃO"}
+            </span>
+          </label>
+
+          {/* Flegue para selecionar a impressão dos cards no relatório PDF */}
+          <label 
+            id="flegue-print-cards-doc"
+            className="flex items-center gap-2 px-3.5 py-2.5 rounded-2xl text-xs font-bold bg-slate-800/90 hover:bg-slate-700/90 border border-slate-600/70 text-slate-100 shadow-sm transition-all cursor-pointer select-none"
+            title="Flegue para selecionar se os cards de resumo devem ser incluídos na impressão do relatório PDF"
+          >
+            <input 
+              type="checkbox" 
+              checked={printCardsInPdf} 
+              onChange={(e) => handleTogglePrintCards(e.target.checked)}
+              className="w-4 h-4 rounded border-slate-500 text-cyan-500 focus:ring-cyan-500 cursor-pointer accent-cyan-500"
+            />
+            <span className="text-slate-300">Imprimir Cards:</span>
+            <span className={cn(
+              "text-[10px] font-black uppercase px-2 py-0.5 rounded-md tracking-wider transition-all",
+              printCardsInPdf 
+                ? "bg-cyan-500/30 text-cyan-300 border border-cyan-400/40 shadow-xs shadow-cyan-500/20" 
+                : "bg-slate-700/60 text-slate-400 border border-slate-600"
+            )}>
+              {printCardsInPdf ? "SIM" : "NÃO"}
+            </span>
+          </label>
+
           <button
-            onClick={exportJustificationsPDF}
+            id="btn-export-justifications-pdf-doc"
+            onClick={() => exportJustificationsPDF(false)}
             className="flex items-center gap-2 px-3.5 py-2.5 rounded-2xl text-xs font-bold bg-white/10 hover:bg-white/20 border border-white/20 text-white backdrop-blur-md transition-all cursor-pointer"
-            title="Exportar relatório formatado em PDF"
+            title={`Exportar relatório formatado em PDF (${printCardsInPdf ? 'com cards de resumo' : 'sem cards'})`}
           >
             <Download size={15} />
             <span>Salvar em PDF</span>
+          </button>
+
+          <button
+            id="btn-print-justifications-doc"
+            onClick={() => exportJustificationsPDF(true)}
+            className="flex items-center gap-2 px-3.5 py-2.5 rounded-2xl text-xs font-bold bg-white/10 hover:bg-white/20 border border-white/20 text-white backdrop-blur-md transition-all cursor-pointer"
+            title={`Imprimir relatório diretamente na impressora (${printCardsInPdf ? 'com cards de resumo' : 'sem cards'})`}
+          >
+            <Printer size={15} />
+            <span>Imprimir</span>
+          </button>
+
+          <button
+            id="btn-doc-history-modal"
+            onClick={() => handleOpenHistory(null)}
+            className="flex items-center gap-2 px-3.5 py-2.5 rounded-2xl text-xs font-bold bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-400/40 backdrop-blur-md transition-all cursor-pointer shadow-xs"
+            title="Consultar histórico detalhado de justificativas e ações anteriores por veículo"
+          >
+            <History size={15} />
+            <span>Histórico de Ações</span>
+            {effectiveHistory && effectiveHistory.length > 0 && (
+              <span className="px-1.5 py-0.5 rounded-full text-[10px] font-black bg-cyan-400 text-slate-950 font-mono">
+                {effectiveHistory.length}
+              </span>
+            )}
           </button>
 
           <button
@@ -1200,109 +1805,289 @@ export const DocJustificationsTab: React.FC<Props> = ({
         </div>
       )}
 
-      {/* KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3.5">
-        <Card3D 
-          variant="blue"
-          isSelected={cardFilter === 'ALL'}
-          onClick={() => setCardFilter('ALL')}
-          title="Ver todos os alertas de documentação"
-        >
-          <div className="flex items-center justify-between w-full">
-            <div>
-              <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Alertas Docs</p>
-              <p className="text-2xl font-black text-slate-900 dark:text-white mt-1">{stats.total}</p>
-            </div>
-            <div className="w-11 h-11 rounded-2xl bg-blue-50 dark:bg-blue-900/40 text-blue-600 dark:text-cyan-400 border border-blue-100/60 dark:border-blue-800/60 flex items-center justify-center shrink-0 shadow-xs">
-              <Layers size={20} />
-            </div>
+      {/* 1. CARDS DE GOVERNANÇA & JUSTIFICATIVAS DA FROTA (IMAGEM 2) */}
+      <div className="space-y-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+              Governança & Justificativas da Frota
+            </span>
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+              {stats.total} Alertas
+            </span>
+            <span className="hidden sm:inline-flex items-center gap-1 text-[10px] text-slate-500 dark:text-slate-400 font-medium">
+              • <span className="font-bold text-slate-700 dark:text-slate-300">Cards 4, 5 e 6:</span> desdobramentos de "Com Justif."
+            </span>
           </div>
-        </Card3D>
+          {cardFilter !== 'ALL' && (
+            <button
+              onClick={() => {
+                setCardFilter('ALL');
+                setOnlyWithJustification(null);
+              }}
+              className="text-[11px] font-bold text-blue-600 hover:text-blue-800 dark:text-blue-400 flex items-center gap-1 cursor-pointer"
+            >
+              <X size={12} /> Limpar filtro de governança
+            </button>
+          )}
+        </div>
 
-        <Card3D 
-          variant="emerald"
-          isSelected={cardFilter === 'WITH_JUST'}
-          onClick={() => setCardFilter(prev => prev === 'WITH_JUST' ? 'ALL' : 'WITH_JUST')}
-          title="Filtrar com justificativa cadastrada"
-        >
-          <div className="flex items-center justify-between w-full">
-            <div>
-              <p className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider">Com Justif.</p>
-              <p className="text-2xl font-black text-emerald-700 dark:text-emerald-300 mt-1">{stats.withJust}</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3.5">
+          <Card3D 
+            variant="blue"
+            isSelected={cardFilter === 'ALL' && onlyWithJustification === null}
+            onClick={() => {
+              setCardFilter('ALL');
+              setOnlyWithJustification(null);
+            }}
+            title="Ver todos os alertas de documentação"
+          >
+            <div className="flex items-center justify-between w-full">
+              <div>
+                <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Alertas Docs</p>
+                <p className="text-2xl font-black text-slate-900 dark:text-white mt-1">{stats.total}</p>
+                <span className="text-[10px] text-slate-400 dark:text-slate-500 block mt-0.5">Veículos / pendências</span>
+              </div>
+              <div className="w-11 h-11 rounded-2xl bg-blue-50 dark:bg-blue-900/40 text-blue-600 dark:text-cyan-400 border border-blue-100/60 dark:border-blue-800/60 flex items-center justify-center shrink-0 shadow-xs">
+                <Layers size={20} />
+              </div>
             </div>
-            <div className="w-11 h-11 rounded-2xl bg-emerald-50 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-300 border border-emerald-100/60 dark:border-emerald-800/60 flex items-center justify-center shrink-0 shadow-xs">
-              <CheckCircle2 size={20} />
-            </div>
-          </div>
-        </Card3D>
+          </Card3D>
 
-        <Card3D 
-          variant="rose"
-          isSelected={cardFilter === 'PENDING'}
-          onClick={() => setCardFilter(prev => prev === 'PENDING' ? 'ALL' : 'PENDING')}
-          title="Filtrar pendentes sem justificativa"
-        >
-          <div className="flex items-center justify-between w-full">
-            <div>
-              <p className="text-[11px] font-bold text-rose-600 dark:text-rose-400 uppercase tracking-wider">Sem Justif.</p>
-              <p className="text-2xl font-black text-rose-700 dark:text-rose-300 mt-1">{stats.pendingJust}</p>
+          <Card3D 
+            variant="emerald"
+            isSelected={cardFilter === 'WITH_JUST' || onlyWithJustification === true}
+            onClick={() => {
+              if (cardFilter === 'WITH_JUST' || onlyWithJustification === true) {
+                setCardFilter('ALL');
+                setOnlyWithJustification(null);
+              } else {
+                setCardFilter('WITH_JUST');
+                setOnlyWithJustification(true);
+              }
+            }}
+            title="Filtrar com justificativa cadastrada (inclui desdobramentos de Postergados, Garagem e Sem Previsão)"
+          >
+            <div className="flex items-center justify-between w-full">
+              <div>
+                <p className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider">Com Justif.</p>
+                <p className="text-2xl font-black text-emerald-700 dark:text-emerald-300 mt-1">{stats.withJust}</p>
+                <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium block mt-0.5" title="Total de justificativas (engloba Próx. Exercício, Garagem e Sem Previsão)">
+                  Registros ativos (total)
+                </span>
+              </div>
+              <div className="w-11 h-11 rounded-2xl bg-emerald-50 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-300 border border-emerald-100/60 dark:border-emerald-800/60 flex items-center justify-center shrink-0 shadow-xs">
+                <CheckCircle2 size={20} />
+              </div>
             </div>
-            <div className="w-11 h-11 rounded-2xl bg-rose-50 dark:bg-rose-900/40 text-rose-600 dark:text-rose-400 border border-rose-100/60 dark:border-rose-800/60 flex items-center justify-center shrink-0 shadow-xs">
-              <AlertOctagon size={20} />
-            </div>
-          </div>
-        </Card3D>
+          </Card3D>
 
-        <Card3D 
-          variant="amber"
-          isSelected={cardFilter === 'POSTPONED'}
-          onClick={() => setCardFilter(prev => prev === 'POSTPONED' ? 'ALL' : 'POSTPONED')}
-          title="Filtrar documentos postergados para próximo exercício"
-        >
-          <div className="flex items-center justify-between w-full">
-            <div>
-              <p className="text-[11px] font-bold text-amber-600 dark:text-amber-400 uppercase tracking-wider">Próx. Exercício</p>
-              <p className="text-2xl font-black text-amber-700 dark:text-amber-300 mt-1">{stats.nextYearPostponed}</p>
+          <Card3D 
+            variant="rose"
+            isSelected={cardFilter === 'PENDING' || onlyWithJustification === false}
+            onClick={() => {
+              if (cardFilter === 'PENDING' || onlyWithJustification === false) {
+                setCardFilter('ALL');
+                setOnlyWithJustification(null);
+              } else {
+                setCardFilter('PENDING');
+                setOnlyWithJustification(false);
+              }
+            }}
+            title={`Filtrar pendentes de justificativa (${pendingStatusesLabel})`}
+          >
+            <div className="flex items-center justify-between w-full">
+              <div>
+                <p className="text-[11px] font-bold text-rose-600 dark:text-rose-400 uppercase tracking-wider">Sem Justif.</p>
+                <p className="text-2xl font-black text-rose-700 dark:text-rose-300 mt-1">{stats.pendingJust}</p>
+                <span className="text-[10px] text-rose-500 dark:text-rose-400 font-medium block mt-0.5" title={`Critério ativo: ${pendingStatusesLabel}`}>
+                  {pendingStatusesLabel}
+                </span>
+              </div>
+              <div className="w-11 h-11 rounded-2xl bg-rose-50 dark:bg-rose-900/40 text-rose-600 dark:text-rose-400 border border-rose-100/60 dark:border-rose-800/60 flex items-center justify-center shrink-0 shadow-xs">
+                <AlertOctagon size={20} />
+              </div>
             </div>
-            <div className="w-11 h-11 rounded-2xl bg-amber-50 dark:bg-amber-900/40 text-amber-600 dark:text-amber-400 border border-amber-100/60 dark:border-amber-800/60 flex items-center justify-center shrink-0 shadow-xs">
-              <Calendar size={20} />
-            </div>
-          </div>
-        </Card3D>
+          </Card3D>
 
-        <Card3D 
-          variant="indigo"
-          isSelected={cardFilter === 'GARAGEM'}
-          onClick={() => setCardFilter(prev => prev === 'GARAGEM' ? 'ALL' : 'GARAGEM')}
-          title="Filtrar por: Parado no Garagem (Autorizações & Gestão)"
-        >
-          <div className="flex items-center justify-between w-full">
-            <div>
-              <p className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider">Parado no Garagem</p>
-              <p className="text-2xl font-black text-indigo-700 dark:text-indigo-300 mt-1">{stats.paradoGaragem}</p>
+          <Card3D 
+            variant="amber"
+            isSelected={cardFilter === 'POSTPONED'}
+            onClick={() => setCardFilter(prev => prev === 'POSTPONED' ? 'ALL' : 'POSTPONED')}
+            title="Filtrar por justificativa: Postergados para o próximo exercício (desdobramento de Com Justif.)"
+          >
+            <div className="flex items-center justify-between w-full">
+              <div>
+                <div className="flex items-center gap-1 mb-1">
+                  <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                    ↳ Justificado
+                  </span>
+                </div>
+                <p className="text-[11px] font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wider">Próx. Exercício</p>
+                <p className="text-2xl font-black text-amber-700 dark:text-amber-300 mt-1">{stats.nextYearPostponed}</p>
+                <span className="text-[10px] text-amber-600 dark:text-amber-400 font-medium block mt-0.5">Próx. Exercício</span>
+              </div>
+              <div className="w-11 h-11 rounded-2xl bg-amber-50 dark:bg-amber-900/40 text-amber-600 dark:text-amber-400 border border-amber-100/60 dark:border-amber-800/60 flex items-center justify-center shrink-0 shadow-xs">
+                <Calendar size={20} />
+              </div>
             </div>
-            <div className="w-11 h-11 rounded-2xl bg-indigo-50 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 border border-indigo-100/60 dark:border-indigo-800/60 flex items-center justify-center shrink-0 shadow-xs">
-              <Warehouse size={20} />
-            </div>
-          </div>
-        </Card3D>
+          </Card3D>
 
-        <Card3D 
-          variant="sky"
-          isSelected={cardFilter === 'SEM_PREVISAO'}
-          onClick={() => setCardFilter(prev => prev === 'SEM_PREVISAO' ? 'ALL' : 'SEM_PREVISAO')}
-          title="Filtrar por: Sem Previsão de Renovação (Prazos, Órgãos & Operação)"
-        >
-          <div className="flex items-center justify-between w-full">
-            <div>
-              <p className="text-[11px] font-bold text-sky-600 dark:text-sky-400 uppercase tracking-wider">Sem Previsão</p>
-              <p className="text-2xl font-black text-sky-700 dark:text-sky-300 mt-1">{stats.semPrevisao}</p>
+          <Card3D 
+            variant="indigo"
+            isSelected={cardFilter === 'GARAGEM'}
+            onClick={() => setCardFilter(prev => prev === 'GARAGEM' ? 'ALL' : 'GARAGEM')}
+            title="Filtrar por justificativa: Parado no Garagem (desdobramento de Com Justif.)"
+          >
+            <div className="flex items-center justify-between w-full">
+              <div>
+                <div className="flex items-center gap-1 mb-1">
+                  <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20">
+                    ↳ Justificado
+                  </span>
+                </div>
+                <p className="text-[11px] font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wider">Parado no Garagem</p>
+                <p className="text-2xl font-black text-indigo-700 dark:text-indigo-300 mt-1">{stats.paradoGaragem}</p>
+                <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-semibold block mt-0.5">Autorizações & Gestão</span>
+              </div>
+              <div className="w-11 h-11 rounded-2xl bg-indigo-50 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 border border-indigo-100/60 dark:border-indigo-800/60 flex items-center justify-center shrink-0 shadow-xs">
+                <Warehouse size={20} />
+              </div>
             </div>
-            <div className="w-11 h-11 rounded-2xl bg-sky-50 dark:bg-sky-900/40 text-sky-600 dark:text-sky-400 border border-sky-100/60 dark:border-sky-800/60 flex items-center justify-center shrink-0 shadow-xs">
-              <CalendarX size={20} />
+          </Card3D>
+
+          <Card3D 
+            variant="sky"
+            isSelected={cardFilter === 'SEM_PREVISAO'}
+            onClick={() => setCardFilter(prev => prev === 'SEM_PREVISAO' ? 'ALL' : 'SEM_PREVISAO')}
+            title="Filtrar por justificativa: Sem Previsão de Renovação (desdobramento de Com Justif.)"
+          >
+            <div className="flex items-center justify-between w-full">
+              <div>
+                <div className="flex items-center gap-1 mb-1">
+                  <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20">
+                    ↳ Justificado
+                  </span>
+                </div>
+                <p className="text-[11px] font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wider">Sem Previsão</p>
+                <p className="text-2xl font-black text-sky-700 dark:text-sky-300 mt-1">{stats.semPrevisao}</p>
+                <span className="text-[10px] text-sky-600 dark:text-sky-400 font-semibold block mt-0.5">Prazos & Operação</span>
+              </div>
+              <div className="w-11 h-11 rounded-2xl bg-sky-50 dark:bg-sky-900/40 text-sky-600 dark:text-sky-400 border border-sky-100/60 dark:border-sky-800/60 flex items-center justify-center shrink-0 shadow-xs">
+                <CalendarX size={20} />
+              </div>
             </div>
+          </Card3D>
+        </div>
+      </div>
+
+      {/* 2. CARDS DE STATUS OPERACIONAL DOS DOCUMENTOS & PRAZOS (IMAGEM 2 - SEPARADOS) */}
+      <div className="space-y-2.5">
+        <div className="flex items-center justify-between px-1">
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+              Status Operacional dos Documentos & Prazos (Documentação)
+            </span>
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
+              Status da Frota
+            </span>
           </div>
-        </Card3D>
+          {statusCardFilter !== 'ALL' && (
+            <button
+              onClick={() => setStatusCardFilter('ALL')}
+              className="text-[11px] font-bold text-rose-600 hover:text-rose-800 dark:text-rose-400 flex items-center gap-1 cursor-pointer"
+            >
+              <X size={12} /> Limpar filtro de status ({statusCardFilter})
+            </button>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+          {/* Card Vencido */}
+          <Card3D 
+            variant="rose"
+            isSelected={statusCardFilter === 'VENCIDO'}
+            onClick={() => setStatusCardFilter(prev => prev === 'VENCIDO' ? 'ALL' : 'VENCIDO')}
+            title="Filtrar documentos vencidos"
+          >
+            <div className="flex items-center justify-between w-full">
+              <div>
+                <span className="text-xs font-bold text-slate-500 dark:text-slate-400 block mb-1">Vencidos</span>
+                <span className="text-2xl font-black text-rose-600 dark:text-rose-400">{statusStats.vencido}</span>
+                <span className="text-[10px] text-rose-500 dark:text-rose-400 font-semibold block mt-0.5">Prazo expirado</span>
+              </div>
+              <div className="w-11 h-11 rounded-2xl bg-rose-50 dark:bg-rose-950/80 flex items-center justify-center text-rose-600 dark:text-rose-400 border border-rose-100/60 dark:border-rose-800/60 shrink-0 shadow-xs">
+                <AlertOctagon size={20} />
+              </div>
+            </div>
+          </Card3D>
+
+          {/* Card Crítico */}
+          <Card3D 
+            variant="amber"
+            isSelected={statusCardFilter === 'CRITICO'}
+            onClick={() => setStatusCardFilter(prev => prev === 'CRITICO' ? 'ALL' : 'CRITICO')}
+            title="Filtrar documentos com vencimento em até 15 dias"
+          >
+            <div className="flex items-center justify-between w-full">
+              <div>
+                <span className="text-xs font-bold text-slate-500 dark:text-slate-400 block mb-1">Crítico (≤ 15d)</span>
+                <span className="text-2xl font-black text-amber-600 dark:text-amber-400">{statusStats.critico}</span>
+                <span className="text-[10px] text-amber-600 dark:text-amber-400 font-semibold block mt-0.5">Urgência de renovação</span>
+              </div>
+              <div className="w-11 h-11 rounded-2xl bg-amber-50 dark:bg-amber-950/80 flex items-center justify-center text-amber-600 dark:text-amber-400 border border-amber-100/60 dark:border-amber-800/60 shrink-0 shadow-xs">
+                <AlertTriangle size={20} />
+              </div>
+            </div>
+          </Card3D>
+
+          {/* Card Em Atenção */}
+          <Card3D 
+            variant="blue"
+            isSelected={statusCardFilter === 'ATENCAO'}
+            onClick={() => setStatusCardFilter(prev => prev === 'ATENCAO' ? 'ALL' : 'ATENCAO')}
+            title="Filtrar documentos com vencimento em até 30 dias"
+          >
+            <div className="flex items-center justify-between w-full">
+              <div>
+                <span className="text-xs font-bold text-slate-500 dark:text-slate-400 block mb-1">Em Atenção (≤ 30d)</span>
+                <span className="text-2xl font-black text-blue-600 dark:text-cyan-400">{statusStats.atencao}</span>
+                <span className="text-[10px] text-blue-500 dark:text-blue-400 font-medium block mt-0.5">Acompanhamento prévio</span>
+              </div>
+              <div className="w-11 h-11 rounded-2xl bg-blue-50 dark:bg-blue-950/80 flex items-center justify-center text-blue-600 dark:text-cyan-400 border border-blue-100/60 dark:border-blue-800/60 shrink-0 shadow-xs">
+                <Clock size={20} />
+              </div>
+            </div>
+          </Card3D>
+
+          {/* Card Regular / Em Dia */}
+          <Card3D 
+            variant="emerald"
+            isSelected={statusCardFilter === 'REGULAR' || (includeRegularDocs && statusCardFilter === 'ALL')}
+            onClick={() => {
+              if (statusCardFilter === 'REGULAR') {
+                setStatusCardFilter('ALL');
+              } else {
+                setStatusCardFilter('REGULAR');
+                setIncludeRegularDocs(true);
+              }
+            }}
+            title="Visualizar documentos regulares sem pendências"
+          >
+            <div className="flex items-center justify-between w-full">
+              <div>
+                <span className="text-xs font-bold text-slate-500 dark:text-slate-400 block mb-1">Regular / Em Dia</span>
+                <span className="text-2xl font-black text-emerald-600 dark:text-emerald-300">{statusStats.regular}</span>
+                <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium block mt-0.5">
+                  {includeRegularDocs || statusCardFilter === 'REGULAR' ? 'Exibindo na tabela' : 'Clique para visualizar'}
+                </span>
+              </div>
+              <div className="w-11 h-11 rounded-2xl bg-emerald-50 dark:bg-emerald-950/80 flex items-center justify-center text-emerald-600 dark:text-emerald-300 border border-emerald-100/60 dark:border-emerald-800/60 shrink-0 shadow-xs">
+                <CheckCircle2 size={20} />
+              </div>
+            </div>
+          </Card3D>
+        </div>
       </div>
 
       {/* Filter and Search Bar - Formato Idêntico ao Anexo */}
@@ -1351,6 +2136,19 @@ export const DocJustificationsTab: React.FC<Props> = ({
             dropdownWidth="w-72"
           />
 
+          {/* Filtro Operação (Multi-select com flegue - Padrão da Imagem 2) */}
+          <MultiSelectFilter
+            id="filter-doc-just-operacao"
+            label="Operação"
+            placeholder="Todas as Operações"
+            icon={<Building2 size={14} />}
+            options={operationOptions}
+            selectedValues={selectedOperations}
+            onChange={setSelectedOperations}
+            searchPlaceholder="Buscar operação..."
+            dropdownWidth="w-72 sm:w-80"
+          />
+
           {/* Filtro Licença (Multi-select com flegue) */}
           <MultiSelectFilter
             id="filter-doc-just-licencas"
@@ -1378,14 +2176,28 @@ export const DocJustificationsTab: React.FC<Props> = ({
             dropdownWidth="w-72"
           />
 
+          {/* Botão / Seletor de Critério de Pendentes */}
+          <PendingStatusSelector
+            id="filter-doc-pending-status-rule"
+            selectedStatuses={pendingStatuses}
+            onChange={handlePendingStatusesChange}
+            statusCounts={pendingStatusCounts}
+            defaultStatuses={['VENCIDO']}
+          />
+
           {/* Botão Limpar Filtros */}
-          {(selectedPlates.length > 0 || selectedFleets.length > 0 || selectedLicenses.length > 0 || selectedStatuses.length > 0) && (
+          {(selectedPlates.length > 0 || selectedFleets.length > 0 || selectedOperations.length > 0 || selectedLicenses.length > 0 || selectedStatuses.length > 0 || cardFilter !== 'ALL' || statusCardFilter !== 'ALL' || onlyWithJustification !== null || searchTerm.trim() !== '') && (
             <button
               onClick={() => {
                 setSelectedPlates([]);
                 setSelectedFleets([]);
+                setSelectedOperations([]);
                 setSelectedLicenses([]);
                 setSelectedStatuses([]);
+                setCardFilter('ALL');
+                setStatusCardFilter('ALL');
+                setOnlyWithJustification(null);
+                setSearchTerm("");
               }}
               className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold text-slate-500 hover:text-rose-600 dark:text-slate-400 dark:hover:text-rose-400 bg-slate-100 dark:bg-slate-900/60 hover:bg-rose-50 dark:hover:bg-rose-950/30 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 transition-all cursor-pointer"
               title="Limpar todos os filtros ativos"
@@ -1398,21 +2210,27 @@ export const DocJustificationsTab: React.FC<Props> = ({
           {/* Quick Filter Buttons */}
           <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-900/80 p-1 rounded-2xl border border-slate-200 dark:border-slate-700">
             <button
-              onClick={() => setOnlyWithJustification(null)}
+              onClick={() => {
+                setCardFilter('ALL');
+                setOnlyWithJustification(null);
+              }}
               className={cn(
                 "px-2.5 py-1.5 rounded-xl text-[11px] font-bold transition-all cursor-pointer",
-                onlyWithJustification === null
+                cardFilter === 'ALL' && onlyWithJustification === null
                   ? "bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm"
                   : "text-slate-600 dark:text-slate-400 hover:text-slate-900"
               )}
             >
-              Todos ({alertVehicles.length})
+              Todos ({stats.total})
             </button>
             <button
-              onClick={() => setOnlyWithJustification(true)}
+              onClick={() => {
+                setCardFilter('WITH_JUST');
+                setOnlyWithJustification(true);
+              }}
               className={cn(
                 "px-2.5 py-1.5 rounded-xl text-[11px] font-bold transition-all cursor-pointer",
-                onlyWithJustification === true
+                cardFilter === 'WITH_JUST' || onlyWithJustification === true
                   ? "bg-emerald-600 text-white shadow-sm"
                   : "text-slate-600 dark:text-slate-400 hover:text-slate-900"
               )}
@@ -1420,10 +2238,13 @@ export const DocJustificationsTab: React.FC<Props> = ({
               Com Justificativa ({stats.withJust})
             </button>
             <button
-              onClick={() => setOnlyWithJustification(false)}
+              onClick={() => {
+                setCardFilter('PENDING');
+                setOnlyWithJustification(false);
+              }}
               className={cn(
                 "px-2.5 py-1.5 rounded-xl text-[11px] font-bold transition-all cursor-pointer",
-                onlyWithJustification === false
+                cardFilter === 'PENDING' || onlyWithJustification === false
                   ? "bg-rose-600 text-white shadow-sm"
                   : "text-slate-600 dark:text-slate-400 hover:text-slate-900"
               )}
@@ -1532,6 +2353,7 @@ export const DocJustificationsTab: React.FC<Props> = ({
                     const vals = getCellValues(item);
                     const isSavingRow = savingRowKey === rowKey;
                     const isSavedRow = savedRowKeys.has(rowKey);
+                    const cat = getJustificationCategoryInfo(vals.reason, vals.actionForecast, vals.observations);
 
                     return (
                       <tr 
@@ -1580,6 +2402,20 @@ export const DocJustificationsTab: React.FC<Props> = ({
                         </td>
 
                         <td className="py-2.5 px-3 min-w-[210px]">
+                          {cat.key && (
+                            <div className="mb-1 flex items-center gap-1">
+                              <span className={cn(
+                                "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-bold border shadow-2xs",
+                                cat.badgeClass
+                              )}>
+                                {cat.key === 'GARAGEM' && <Warehouse size={10} />}
+                                {cat.key === 'SEM_PREVISAO' && <CalendarX size={10} />}
+                                {cat.key === 'POSTPONED' && <Calendar size={10} />}
+                                <span>{cat.label}</span>
+                              </span>
+                              <span className="text-[9px] text-slate-400 font-medium">↳ Justificado</span>
+                            </div>
+                          )}
                           <input
                             type="text"
                             value={vals.reason}
@@ -1673,6 +2509,13 @@ export const DocJustificationsTab: React.FC<Props> = ({
                             {hasJust ? (
                               <>
                                 <button
+                                  onClick={() => handleOpenHistory(item.plate)}
+                                  className="p-1.5 rounded-xl bg-slate-100 hover:bg-cyan-50 text-slate-600 hover:text-cyan-600 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-300 transition-colors cursor-pointer"
+                                  title={`Ver histórico de ações anteriores da placa ${item.plate}`}
+                                >
+                                  <History size={14} />
+                                </button>
+                                <button
                                   onClick={() => handleOpenModal(item)}
                                   className="p-1.5 rounded-xl bg-slate-100 hover:bg-blue-50 text-slate-600 hover:text-blue-600 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-300 transition-colors cursor-pointer"
                                   title="Editar no formulário completo"
@@ -1688,14 +2531,23 @@ export const DocJustificationsTab: React.FC<Props> = ({
                                 </button>
                               </>
                             ) : (
-                              <button
-                                onClick={() => handleOpenModal(item)}
-                                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 dark:bg-blue-950/60 dark:hover:bg-blue-900/80 dark:text-blue-300 text-[11px] font-bold border border-blue-200 dark:border-blue-800 transition-colors cursor-pointer shadow-sm"
-                                title="Abrir formulário de justificativa"
-                              >
-                                <Plus size={12} />
-                                <span>Justificar</span>
-                              </button>
+                              <>
+                                <button
+                                  onClick={() => handleOpenHistory(item.plate)}
+                                  className="p-1.5 rounded-xl bg-slate-100 hover:bg-cyan-50 text-slate-600 hover:text-cyan-600 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-300 transition-colors cursor-pointer"
+                                  title={`Ver histórico de ações anteriores da placa ${item.plate}`}
+                                >
+                                  <History size={14} />
+                                </button>
+                                <button
+                                  onClick={() => handleOpenModal(item)}
+                                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 dark:bg-blue-950/60 dark:hover:bg-blue-900/80 dark:text-blue-300 text-[11px] font-bold border border-blue-200 dark:border-blue-800 transition-colors cursor-pointer shadow-sm"
+                                  title="Abrir formulário de justificativa"
+                                >
+                                  <Plus size={12} />
+                                  <span>Justificar</span>
+                                </button>
+                              </>
                             )}
                           </div>
                         </td>
@@ -1848,10 +2700,25 @@ export const DocJustificationsTab: React.FC<Props> = ({
                     </div>
 
                     {/* Document badge */}
-                    <div className="mb-3.5 pb-3 border-b border-slate-100 dark:border-slate-700/60">
+                    <div className="mb-3.5 pb-3 border-b border-slate-100 dark:border-slate-700/60 flex flex-wrap items-center gap-1.5">
                       <span className="text-xs font-bold text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/60 px-2.5 py-1 rounded-lg">
                         {item.documentType}
                       </span>
+                      {(() => {
+                        const cardCat = getJustificationCategoryInfo(j?.reason, j?.actionForecast, j?.observations);
+                        if (!cardCat.key) return null;
+                        return (
+                          <span className={cn(
+                            "inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-bold border shadow-2xs",
+                            cardCat.badgeClass
+                          )}>
+                            {cardCat.key === 'GARAGEM' && <Warehouse size={11} />}
+                            {cardCat.key === 'SEM_PREVISAO' && <CalendarX size={11} />}
+                            {cardCat.key === 'POSTPONED' && <Calendar size={11} />}
+                            <span>{cardCat.label}</span>
+                          </span>
+                        );
+                      })()}
                     </div>
 
                     {/* Justification details or Call to Action */}
@@ -1910,6 +2777,13 @@ export const DocJustificationsTab: React.FC<Props> = ({
                       {hasJust ? `Atualizado: ${j?.updatedAt || "-"}` : "Sem registro"}
                     </span>
                     <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => handleOpenHistory(item.plate)}
+                        className="p-2 rounded-xl text-slate-400 hover:text-cyan-600 hover:bg-cyan-50 dark:hover:bg-cyan-950/50 transition-all cursor-pointer"
+                        title={`Ver histórico de ações anteriores da placa ${item.plate}`}
+                      >
+                        <History size={14} />
+                      </button>
                       {hasJust && (
                         <button
                           onClick={() => handleDelete(j!.id, item.plate)}
@@ -2763,6 +3637,22 @@ export const DocJustificationsTab: React.FC<Props> = ({
           </div>
         </div>
       )}
+
+      {/* Modal de Histórico de Justificativas e Ações por Veículo */}
+      <VehicleJustificationHistoryModal
+        isOpen={isHistoryModalOpen}
+        onClose={() => setIsHistoryModalOpen(false)}
+        selectedPlate={historyTargetPlate}
+        historyItems={effectiveHistory}
+        activeJustifications={justifications}
+        baseFleet={baseFleet}
+        onAddHistoryItem={onAddHistoryItem}
+        renderModernPDFHeader={renderModernPDFHeader}
+        loadPDFLogo={loadPDFLogo}
+        theme={theme}
+        title="Histórico de Justificativas - Documentação"
+        sourceType="DOCUMENTACAO"
+      />
     </div>
   );
 };

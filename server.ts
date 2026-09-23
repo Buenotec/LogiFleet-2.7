@@ -469,6 +469,99 @@ function extractCleanDocTypeAndValidity(rawKey: string, initialValidity: string)
     }
   });
 
+  const JUSTIFICATIONS_HISTORY_FILE = path.join(process.cwd(), "justifications_history_db.json");
+  const DOC_JUSTIFICATIONS_HISTORY_FILE = path.join(process.cwd(), "doc_justifications_history_db.json");
+
+  // History routes for License Justifications
+  app.get("/api/justifications/history", async (req, res) => {
+    try {
+      const firestoreData = await getFirestoreDoc("license_justifications_history", "all");
+      if (firestoreData && Array.isArray(firestoreData.items)) {
+        try {
+          fs.writeFileSync(JUSTIFICATIONS_HISTORY_FILE, JSON.stringify(firestoreData, null, 2), "utf-8");
+        } catch (_) {}
+        return res.json(firestoreData);
+      }
+      if (fs.existsSync(JUSTIFICATIONS_HISTORY_FILE)) {
+        const data = fs.readFileSync(JUSTIFICATIONS_HISTORY_FILE, "utf-8");
+        return res.json(JSON.parse(data));
+      }
+      return res.json({ items: [], lastUpdated: null });
+    } catch (err) {
+      console.error("Error reading justifications history:", err);
+      if (fs.existsSync(JUSTIFICATIONS_HISTORY_FILE)) {
+        try {
+          return res.json(JSON.parse(fs.readFileSync(JUSTIFICATIONS_HISTORY_FILE, "utf-8")));
+        } catch (_) {}
+      }
+      return res.status(500).json({ error: "Failed to read justifications history" });
+    }
+  });
+
+  app.post("/api/justifications/history", async (req, res) => {
+    try {
+      const items = Array.isArray(req.body?.items) ? req.body.items : (Array.isArray(req.body) ? req.body : []);
+      const payload = {
+        items,
+        lastUpdated: new Date().toISOString(),
+        count: items.length
+      };
+      await setFirestoreDoc("license_justifications_history", "all", payload);
+      try {
+        fs.writeFileSync(JUSTIFICATIONS_HISTORY_FILE, JSON.stringify(payload, null, 2), "utf-8");
+      } catch (_) {}
+      return res.json({ success: true, count: items.length, lastUpdated: payload.lastUpdated });
+    } catch (err) {
+      console.error("Error writing justifications history:", err);
+      return res.status(500).json({ error: "Failed to save justifications history" });
+    }
+  });
+
+  // History routes for Document Justifications
+  app.get("/api/doc-justifications/history", async (req, res) => {
+    try {
+      const firestoreData = await getFirestoreDoc("doc_justifications_history", "all");
+      if (firestoreData && Array.isArray(firestoreData.items)) {
+        try {
+          fs.writeFileSync(DOC_JUSTIFICATIONS_HISTORY_FILE, JSON.stringify(firestoreData, null, 2), "utf-8");
+        } catch (_) {}
+        return res.json(firestoreData);
+      }
+      if (fs.existsSync(DOC_JUSTIFICATIONS_HISTORY_FILE)) {
+        const data = fs.readFileSync(DOC_JUSTIFICATIONS_HISTORY_FILE, "utf-8");
+        return res.json(JSON.parse(data));
+      }
+      return res.json({ items: [], lastUpdated: null });
+    } catch (err) {
+      console.error("Error reading doc justifications history:", err);
+      if (fs.existsSync(DOC_JUSTIFICATIONS_HISTORY_FILE)) {
+        try {
+          return res.json(JSON.parse(fs.readFileSync(DOC_JUSTIFICATIONS_HISTORY_FILE, "utf-8")));
+        } catch (_) {}
+      }
+      return res.status(500).json({ error: "Failed to read doc justifications history" });
+    }
+  });
+
+  app.post("/api/doc-justifications/history", async (req, res) => {
+    try {
+      const items = Array.isArray(req.body?.items) ? req.body.items : (Array.isArray(req.body) ? req.body : []);
+      const payload = {
+        items,
+        lastUpdated: new Date().toISOString(),
+        count: items.length
+      };
+      await setFirestoreDoc("doc_justifications_history", "all", payload);
+      try {
+        fs.writeFileSync(DOC_JUSTIFICATIONS_HISTORY_FILE, JSON.stringify(payload, null, 2), "utf-8");
+      } catch (_) {}
+      return res.json({ success: true, count: items.length, lastUpdated: payload.lastUpdated });
+    } catch (err) {
+      console.error("Error writing doc justifications history:", err);
+      return res.status(500).json({ error: "Failed to save doc justifications history" });
+    }
+  });
+
   // Google OAuth Routes
   app.get("/api/auth/google/url", (req, res) => {
     if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {

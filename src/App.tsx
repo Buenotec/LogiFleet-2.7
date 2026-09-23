@@ -57,7 +57,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { format, isAfter, isBefore, addDays, parseISO, subHours, differenceInDays, parse, startOfDay, isValid } from "date-fns";
 import Papa from "papaparse";
 import { cn } from "@/src/lib/utils";
-import { type Vehicle, type FleetStats, type LicenseJustification, normalizeDocKey } from "./types";
+import { type Vehicle, type FleetStats, type LicenseJustification, type JustificationHistoryItem, normalizeDocKey } from "./types";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 import * as XLSX from "xlsx";
@@ -1235,6 +1235,24 @@ export default function App() {
   });
   const [docJustificationsLoaded, setDocJustificationsLoaded] = useState(false);
 
+  // Histórico detalhado de ações por veículo (Licenças e Documentação)
+  const [licenseHistory, setLicenseHistory] = useState<JustificationHistoryItem[]>(() => {
+    try {
+      const saved = localStorage.getItem("uni_license_justifications_history");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [docHistory, setDocHistory] = useState<JustificationHistoryItem[]>(() => {
+    try {
+      const saved = localStorage.getItem("uni_doc_justifications_history");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
   // Fullscreen state and handler for header button
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -1559,20 +1577,46 @@ export default function App() {
 
     setJustifications(nextJustifications);
 
+    // Gravar no histórico de ações do veículo
+    const histItem: JustificationHistoryItem = {
+      id: `hist-lic-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      justificationId: just.id,
+      plate: just.plate,
+      fleet: just.fleet,
+      operation: just.operation,
+      documentType: just.documentType,
+      status: just.status,
+      reason: just.reason,
+      authorizedBy: just.authorizedBy,
+      actionForecast: just.actionForecast,
+      observations: just.observations,
+      updatedAt: just.updatedAt || format(new Date(), "dd/MM/yyyy HH:mm"),
+      updatedBy: just.updatedBy || "Sistema",
+      actionType: "ATUALIZADA"
+    };
+    const nextHist = [histItem, ...licenseHistory];
+    setLicenseHistory(nextHist);
+
     // 1. Immediate local persistence
     try {
       localStorage.setItem("uni_license_justifications", JSON.stringify(nextJustifications));
+      localStorage.setItem("uni_license_justifications_history", JSON.stringify(nextHist));
     } catch (e) {
       console.warn("Erro ao salvar localmente:", e);
     }
 
     // 2. Server persistence across machines
     try {
-      await fetch("/api/justifications", {
+      fetch("/api/justifications", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ items: nextJustifications })
-      });
+      }).catch(() => {});
+      fetch("/api/justifications/history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: nextHist })
+      }).catch(() => {});
     } catch (err) {
       console.warn("Backup to /api/justifications failed:", err);
     }
@@ -1584,22 +1628,58 @@ export default function App() {
         items: nextJustifications,
         updatedAt: new Date().toISOString()
       }).catch(e => console.warn("Firestore license sync notice:", e));
+
+      const histDocRef = doc(db, "license_justifications_history", "all");
+      setDoc(histDocRef, {
+        items: nextHist,
+        updatedAt: new Date().toISOString()
+      }).catch(e => console.warn("Firestore license hist notice:", e));
     } catch (_) {}
   };
 
   const handleDeleteJustification = async (id: string) => {
+    const targetJust = justifications.find(j => j.id === id);
     const nextJustifications = justifications.filter(j => j.id !== id);
     setJustifications(nextJustifications);
+
+    let nextHist = licenseHistory;
+    if (targetJust) {
+      const histItem: JustificationHistoryItem = {
+        id: `hist-lic-del-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        justificationId: targetJust.id,
+        plate: targetJust.plate,
+        fleet: targetJust.fleet,
+        operation: targetJust.operation,
+        documentType: targetJust.documentType,
+        status: targetJust.status,
+        reason: targetJust.reason,
+        authorizedBy: targetJust.authorizedBy,
+        actionForecast: targetJust.actionForecast,
+        observations: "Justificativa excluída / liberada do sistema",
+        updatedAt: format(new Date(), "dd/MM/yyyy HH:mm"),
+        updatedBy: "Sistema",
+        actionType: "EXCLUIDA"
+      };
+      nextHist = [histItem, ...licenseHistory];
+      setLicenseHistory(nextHist);
+    }
+
     try {
       localStorage.setItem("uni_license_justifications", JSON.stringify(nextJustifications));
+      localStorage.setItem("uni_license_justifications_history", JSON.stringify(nextHist));
     } catch (_) {}
 
     try {
-      await fetch("/api/justifications", {
+      fetch("/api/justifications", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ items: nextJustifications })
-      });
+      }).catch(() => {});
+      fetch("/api/justifications/history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: nextHist })
+      }).catch(() => {});
     } catch (err) {
       console.warn("Delete in /api/justifications failed:", err);
     }
@@ -1610,7 +1690,30 @@ export default function App() {
         items: nextJustifications,
         updatedAt: new Date().toISOString()
       }).catch(e => console.warn("Firestore delete notice:", e));
+
+      const histDocRef = doc(db, "license_justifications_history", "all");
+      setDoc(histDocRef, {
+        items: nextHist,
+        updatedAt: new Date().toISOString()
+      }).catch(() => {});
     } catch (_) {}
+  };
+
+  const handleAddLicenseHistoryItem = async (item: JustificationHistoryItem) => {
+    const nextHist = [item, ...licenseHistory.filter(h => h.id !== item.id)];
+    setLicenseHistory(nextHist);
+    try {
+      localStorage.setItem("uni_license_justifications_history", JSON.stringify(nextHist));
+      await fetch("/api/justifications/history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: nextHist })
+      });
+      const histDocRef = doc(db, "license_justifications_history", "all");
+      await setDoc(histDocRef, { items: nextHist, updatedAt: new Date().toISOString() });
+    } catch (err) {
+      console.warn("Error saving license history item:", err);
+    }
   };
 
   // Cross-machine synchronization & persistence for Document Justifications
@@ -1690,20 +1793,46 @@ export default function App() {
 
     setDocJustifications(nextJustifications);
 
+    // Gravar no histórico de ações do veículo
+    const histItem: JustificationHistoryItem = {
+      id: `hist-doc-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      justificationId: just.id,
+      plate: just.plate,
+      fleet: just.fleet,
+      operation: just.operation,
+      documentType: just.documentType,
+      status: just.status,
+      reason: just.reason,
+      authorizedBy: just.authorizedBy,
+      actionForecast: just.actionForecast,
+      observations: just.observations,
+      updatedAt: just.updatedAt || format(new Date(), "dd/MM/yyyy HH:mm"),
+      updatedBy: just.updatedBy || "Sistema",
+      actionType: "ATUALIZADA"
+    };
+    const nextHist = [histItem, ...docHistory];
+    setDocHistory(nextHist);
+
     // 1. Local storage
     try {
       localStorage.setItem("uni_doc_justifications", JSON.stringify(nextJustifications));
+      localStorage.setItem("uni_doc_justifications_history", JSON.stringify(nextHist));
     } catch (e) {
       console.warn("Erro ao salvar localmente:", e);
     }
 
     // 2. Server persistence across machines
     try {
-      await fetch("/api/doc-justifications", {
+      fetch("/api/doc-justifications", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ items: nextJustifications })
-      });
+      }).catch(() => {});
+      fetch("/api/doc-justifications/history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: nextHist })
+      }).catch(() => {});
     } catch (err) {
       console.warn("Backup to /api/doc-justifications failed:", err);
     }
@@ -1715,22 +1844,58 @@ export default function App() {
         items: nextJustifications,
         updatedAt: new Date().toISOString()
       }).catch(e => console.warn("Firestore doc sync notice:", e));
+
+      const histDocRef = doc(db, "doc_justifications_history", "all");
+      setDoc(histDocRef, {
+        items: nextHist,
+        updatedAt: new Date().toISOString()
+      }).catch(e => console.warn("Firestore doc hist notice:", e));
     } catch (_) {}
   };
 
   const handleDeleteDocJustification = async (id: string) => {
+    const targetJust = docJustifications.find(j => j.id === id);
     const nextJustifications = docJustifications.filter(j => j.id !== id);
     setDocJustifications(nextJustifications);
+
+    let nextHist = docHistory;
+    if (targetJust) {
+      const histItem: JustificationHistoryItem = {
+        id: `hist-doc-del-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        justificationId: targetJust.id,
+        plate: targetJust.plate,
+        fleet: targetJust.fleet,
+        operation: targetJust.operation,
+        documentType: targetJust.documentType,
+        status: targetJust.status,
+        reason: targetJust.reason,
+        authorizedBy: targetJust.authorizedBy,
+        actionForecast: targetJust.actionForecast,
+        observations: "Justificativa excluída / liberada do sistema",
+        updatedAt: format(new Date(), "dd/MM/yyyy HH:mm"),
+        updatedBy: "Sistema",
+        actionType: "EXCLUIDA"
+      };
+      nextHist = [histItem, ...docHistory];
+      setDocHistory(nextHist);
+    }
+
     try {
       localStorage.setItem("uni_doc_justifications", JSON.stringify(nextJustifications));
+      localStorage.setItem("uni_doc_justifications_history", JSON.stringify(nextHist));
     } catch (_) {}
 
     try {
-      await fetch("/api/doc-justifications", {
+      fetch("/api/doc-justifications", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ items: nextJustifications })
-      });
+      }).catch(() => {});
+      fetch("/api/doc-justifications/history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: nextHist })
+      }).catch(() => {});
     } catch (err) {
       console.warn("Delete in /api/doc-justifications failed:", err);
     }
@@ -1741,8 +1906,128 @@ export default function App() {
         items: nextJustifications,
         updatedAt: new Date().toISOString()
       }).catch(e => console.warn("Firestore delete doc notice:", e));
+
+      const histDocRef = doc(db, "doc_justifications_history", "all");
+      setDoc(histDocRef, {
+        items: nextHist,
+        updatedAt: new Date().toISOString()
+      }).catch(() => {});
     } catch (_) {}
   };
+
+  const handleAddDocHistoryItem = async (item: JustificationHistoryItem) => {
+    const nextHist = [item, ...docHistory.filter(h => h.id !== item.id)];
+    setDocHistory(nextHist);
+    try {
+      localStorage.setItem("uni_doc_justifications_history", JSON.stringify(nextHist));
+      await fetch("/api/doc-justifications/history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: nextHist })
+      });
+      const histDocRef = doc(db, "doc_justifications_history", "all");
+      await setDoc(histDocRef, { items: nextHist, updatedAt: new Date().toISOString() });
+    } catch (err) {
+      console.warn("Error saving doc history item:", err);
+    }
+  };
+
+  // Sincronização em segundo plano dos históricos de ações
+  useEffect(() => {
+    const syncHistories = async () => {
+      try {
+        const [resLic, resDoc] = await Promise.all([
+          fetch("/api/justifications/history"),
+          fetch("/api/doc-justifications/history")
+        ]);
+        if (resLic.ok) {
+          const dataLic = await resLic.json();
+          if (dataLic && Array.isArray(dataLic.items) && dataLic.items.length > 0) {
+            setLicenseHistory(dataLic.items);
+            try {
+              localStorage.setItem("uni_license_justifications_history", JSON.stringify(dataLic.items));
+            } catch (_) {}
+          }
+        }
+        if (resDoc.ok) {
+          const dataDoc = await resDoc.json();
+          if (dataDoc && Array.isArray(dataDoc.items) && dataDoc.items.length > 0) {
+            setDocHistory(dataDoc.items);
+            try {
+              localStorage.setItem("uni_doc_justifications_history", JSON.stringify(dataDoc.items));
+            } catch (_) {}
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to sync history from API:", err);
+      }
+    };
+
+    syncHistories();
+    const interval = setInterval(syncHistories, 25000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Auto-seed history from existing justifications when history is empty
+  useEffect(() => {
+    if (justificationsLoaded && justifications.length > 0 && licenseHistory.length === 0) {
+      const seeded: JustificationHistoryItem[] = justifications.map(j => ({
+        id: `hist-lic-${j.id || Math.random().toString(36).substring(2, 8)}`,
+        justificationId: j.id,
+        plate: j.plate,
+        fleet: j.fleet,
+        operation: j.operation,
+        documentType: j.documentType,
+        status: j.status,
+        reason: j.reason,
+        authorizedBy: j.authorizedBy,
+        actionForecast: j.actionForecast,
+        observations: j.observations,
+        updatedAt: j.updatedAt || format(new Date(), "dd/MM/yyyy HH:mm"),
+        updatedBy: j.updatedBy || "Gestão da Frota",
+        actionType: "JUSTIFICATIVA ATIVA"
+      }));
+      setLicenseHistory(seeded);
+      try {
+        localStorage.setItem("uni_license_justifications_history", JSON.stringify(seeded));
+        fetch("/api/justifications/history", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items: seeded })
+        }).catch(() => {});
+      } catch (_) {}
+    }
+  }, [justificationsLoaded, justifications, licenseHistory.length]);
+
+  useEffect(() => {
+    if (docJustificationsLoaded && docJustifications.length > 0 && docHistory.length === 0) {
+      const seeded: JustificationHistoryItem[] = docJustifications.map(j => ({
+        id: `hist-doc-${j.id || Math.random().toString(36).substring(2, 8)}`,
+        justificationId: j.id,
+        plate: j.plate,
+        fleet: j.fleet,
+        operation: j.operation,
+        documentType: j.documentType,
+        status: j.status,
+        reason: j.reason,
+        authorizedBy: j.authorizedBy,
+        actionForecast: j.actionForecast,
+        observations: j.observations,
+        updatedAt: j.updatedAt || format(new Date(), "dd/MM/yyyy HH:mm"),
+        updatedBy: j.updatedBy || "Gestão da Frota",
+        actionType: "JUSTIFICATIVA ATIVA"
+      }));
+      setDocHistory(seeded);
+      try {
+        localStorage.setItem("uni_doc_justifications_history", JSON.stringify(seeded));
+        fetch("/api/doc-justifications/history", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items: seeded })
+        }).catch(() => {});
+      } catch (_) {}
+    }
+  }, [docJustificationsLoaded, docJustifications, docHistory.length]);
 
   const UNI_LOGO = "https://raw.githubusercontent.com/Buenotec/Logo_UNI/refs/heads/main/logo_uni.png"; 
 
@@ -7195,6 +7480,8 @@ export default function App() {
                       theme={theme}
                       isGoogleConnected={isGoogleConnected}
                       onConnectGoogle={handleGoogleConnect}
+                      historyItems={licenseHistory}
+                      onAddHistoryItem={handleAddLicenseHistoryItem}
                     />
                   ) : (
                     <>
@@ -7502,6 +7789,8 @@ export default function App() {
                       loadPDFLogo={loadPDFLogo}
                       includePdfSummaries={includePdfSummaries}
                       theme={theme}
+                      historyItems={docHistory}
+                      onAddHistoryItem={handleAddDocHistoryItem}
                     />
                   ) : (
                     <>
